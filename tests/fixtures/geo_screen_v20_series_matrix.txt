@@ -1,0 +1,19 @@
+!Series_title = synthetic local GEO v20 screen fixture
+!Sample_geo_accession = GSM2001
+!Sample_geo_accession = GSM2002
+!Sample_geo_accession = GSM2003
+!Sample_geo_accession = GSM2004
+!Sample_title = control replicate 1
+!Sample_title = control replicate 2
+!Sample_title = treated replicate 1
+!Sample_title = treated replicate 2
+!Sample_platform_id = GPLV20
+!Sample_platform_id = GPLV20
+!Sample_platform_id = GPLV20
+!Sample_platform_id = GPLV20
+!series_matrix_table_begin
+ID_REF	GSM2001	GSM2002	GSM2003	GSM2004
+probe_1	8.10	8.20	9.10	9.20
+probe_2	7.00	7.10	7.90	8.00
+probe_3	5.50	5.60	5.55	5.65
+!series_matrix_table_end
