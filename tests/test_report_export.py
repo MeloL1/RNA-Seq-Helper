@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,6 +42,10 @@ def test_xlsx_export_is_a_minimal_readable_result_table(tmp_path: Path) -> None:
     }
 
     ReportService._write_xlsx(output, object(), object(), result, "ignored", {})
+    AnalysisService._write_result(
+        tmp_path, SimpleNamespace(as_dict=lambda: {"plan_id": "test"}), result,
+    )
+    saved_result = json.loads((tmp_path / "analysis" / "deg-result.json").read_text(encoding="utf-8"))
 
     workbook = load_workbook(output, data_only=True)
     assert workbook.sheetnames == ["DEG Results"]
@@ -49,6 +54,16 @@ def test_xlsx_export_is_a_minimal_readable_result_table(tmp_path: Path) -> None:
     assert sheet.max_column == len(ReportService.RESULT_EXPORT_COLUMNS)
     assert [cell.value for cell in sheet[2]] == ["feature-1", "NA", 1.25, "NA", "NA"]
     assert [cell.value for cell in sheet[3]] == ["feature-2", "GENE2", -0.5, 0.01, 0.02]
+    json_rows = saved_result["table"]
+    expected = [
+        [ReportService._export_result_value(row.get(column)) for column in ReportService.RESULT_EXPORT_COLUMNS]
+        for row in json_rows
+    ]
+    actual = [
+        [cell.value for cell in sheet[row_number]]
+        for row_number in range(2, sheet.max_row + 1)
+    ]
+    assert actual == expected
     workbook.close()
 
 
