@@ -277,6 +277,45 @@ class ExpressionFilterSpec:
 
 
 @dataclass(frozen=True)
+class ResultFilterConfig:
+    """结果展示筛选；与拟合模型参数严格分离。"""
+
+    pvalue_mode: str = "fdr"
+    pvalue_threshold: float = 0.05
+    log2fc_threshold: float = 1.0
+
+    def __post_init__(self) -> None:
+        import math
+
+        if self.pvalue_mode not in {"fdr", "pvalue"}:
+            raise ValueError("P 值判定方式必须是 FDR 或原始 P 值")
+        if not math.isfinite(float(self.pvalue_threshold)) or not 0 <= float(self.pvalue_threshold) <= 1:
+            raise ValueError("P 值阈值必须在 0 到 1 之间")
+        if not math.isfinite(float(self.log2fc_threshold)) or float(self.log2fc_threshold) < 0:
+            raise ValueError("log2FC 阈值必须是大于或等于 0 的有限数值")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "pvalue_mode": self.pvalue_mode,
+            "pvalue_threshold": float(self.pvalue_threshold),
+            "log2fc_threshold": float(self.log2fc_threshold),
+        }
+
+    @classmethod
+    def from_mapping(cls, value: Any) -> "ResultFilterConfig":
+        if not isinstance(value, Mapping):
+            return cls()
+        try:
+            return cls(
+                pvalue_mode=str(value.get("pvalue_mode", "fdr")),
+                pvalue_threshold=float(value.get("pvalue_threshold", 0.05)),
+                log2fc_threshold=float(value.get("log2fc_threshold", 1.0)),
+            )
+        except (TypeError, ValueError, OverflowError):
+            return cls()
+
+
+@dataclass(frozen=True)
 class DEGConfig:
     control_group: str
     test_group: str
@@ -317,6 +356,7 @@ class AnalysisPlan:
     contrast: Mapping[str, Any]
     preprocessing: Mapping[str, Any]
     config: DEGConfig
+    result_filter: ResultFilterConfig = field(default_factory=ResultFilterConfig)
     limitations_zh: tuple[str, ...] = ()
     input_selection_reason_zh: str = ""
     warnings: tuple[str, ...] = ()
@@ -346,6 +386,7 @@ class AnalysisPlan:
             "contrast": dict(self.contrast),
             "preprocessing": dict(self.preprocessing),
             "config": self.config.as_dict(),
+            "result_filter": self.result_filter.as_dict(),
             "limitations_zh": list(self.limitations_zh),
             "input_selection_reason_zh": self.input_selection_reason_zh,
             "warnings": list(self.warnings),
@@ -388,6 +429,7 @@ class ExpressionMatrix:
     measurement_provenance: str = ""
     platform_id: str | None = None
     source_modality: str | None = None
+    source_path: Path | None = None
 
 
 @dataclass(frozen=True)

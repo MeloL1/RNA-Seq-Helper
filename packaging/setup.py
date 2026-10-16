@@ -9,18 +9,22 @@ sys.path.insert(0, str(ROOT / "src"))
 APP = [str(ROOT / "src" / "rnaseq_helper" / "app.py")]
 DATA_FILES = [
     ("resources/r", [str(ROOT / "resources" / "r" / "worker.R")]),
-    ("resources/ui", [str(ROOT / "resources" / "ui" / "combobox-arrow.svg")]),
+    ("resources/ui", [
+        str(ROOT / "resources" / "ui" / "combobox-arrow.svg"),
+        str(ROOT / "resources" / "ui" / "app-icon.svg"),
+        str(ROOT / "resources" / "ui" / "AppIcon.icns"),
+    ]),
 ]
 OPTIONS = {
     "argv_emulation": False,
     "packages": ["rnaseq_helper", "openpyxl", "xlrd"],
     "includes": ["numpy", "PySide6.QtCore", "PySide6.QtWidgets", "shiboken6"],
-    "iconfile": None,
+    "iconfile": str(ROOT / "resources" / "ui" / "AppIcon.icns"),
     "plist": {
         "CFBundleName": "RNA-Seq Helper",
         "CFBundleDisplayName": "RNA-Seq Helper",
         "CFBundleIdentifier": "org.rnaseqhelper.app",
-        "CFBundleShortVersionString": "0.30.0",
+        "CFBundleShortVersionString": "0.35.0",
     },
 }
 

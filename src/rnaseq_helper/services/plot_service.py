@@ -12,7 +12,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.cluster.hierarchy import leaves_list, linkage
 
-from rnaseq_helper.domain.models import AnalysisPlan, ExpressionMatrix
+from rnaseq_helper.analysis.result_filter import is_pvalue_significant, passes_result_filter, selected_pvalue
+from rnaseq_helper.domain.models import AnalysisPlan, ExpressionMatrix, ResultFilterConfig
 
 
 PALETTE = {"up": "#D55E00", "down": "#0072B2", "ns": "#999999"}
@@ -59,6 +60,42 @@ class PlotService:
                 ensure_ascii=False,
                 indent=2,
             ) + "\n",
+            encoding="utf-8",
+        )
+        return figures
+
+    @classmethod
+    def refresh_filter_dependent(
+        cls,
+        matrix: ExpressionMatrix,
+        plan: AnalysisPlan,
+        result: dict[str, Any],
+        figure_dir: Path,
+    ) -> dict[str, Path]:
+        """Regenerate only volcano/heatmap; PCA and correlation are threshold-independent."""
+        figure_dir = Path(figure_dir)
+        figure_dir.mkdir(parents=True, exist_ok=True)
+        feature_ids, sample_ids, values, transform = cls._plot_matrix(result)
+        labels = cls._display_labels(result, feature_ids)
+        assignments = plan.design.get("assignments", {})
+        groups = [str(assignments.get(sample_id, "unassigned")) for sample_id in sample_ids]
+        cls._volcano(figure_dir / "volcano.png", result, plan, labels)
+        cls._heatmap(
+            figure_dir / "top-heatmap.png", values, feature_ids, sample_ids,
+            groups, result, plan, transform, labels,
+        )
+        figures = {
+            "pca": figure_dir / "pca.png",
+            "sample_correlation": figure_dir / "sample-correlation.png",
+            "pvalue_histogram": figure_dir / "p-value-histogram.png",
+            "volcano": figure_dir / "volcano.png",
+            "top_heatmap": figure_dir / "top-heatmap.png",
+        }
+        missing = [path.name for path in figures.values() if not path.is_file()]
+        if missing:
+            raise FileNotFoundError("现有项目缺少无法安全保留的图表：" + "、".join(missing))
+        (figure_dir / "figure-manifest.json").write_text(
+            json.dumps({key: f"figures/{path.name}" for key, path in figures.items()}, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
         return figures
@@ -255,31 +292,39 @@ class PlotService:
     ) -> Path:
         cls._style()
         rows = result.get("table", [])
-        lfc_cutoff = plan.config.lfc_threshold
-        fdr = plan.config.fdr_threshold
+        result_filter = ResultFilterConfig.from_mapping(
+            result.get("active_result_filter", plan.result_filter.as_dict())
+        )
+        lfc_cutoff = result_filter.log2fc_threshold
+        pvalue_threshold = result_filter.pvalue_threshold
         points: list[tuple[float, float, str]] = []
         ranked: list[tuple[float, str, float, float]] = []
         for row in rows:
-            lfc, padj = row.get("log2FoldChange"), row.get("padj")
+            lfc = row.get("log2FoldChange")
             if not isinstance(lfc, (int, float)) or not np.isfinite(lfc):
                 continue
-            if not isinstance(padj, (int, float)) or not np.isfinite(padj):
+            pvalue = selected_pvalue(row, result_filter)
+            if pvalue is None:
                 continue
-            significant = padj < fdr
-            y_value = -np.log10(max(float(padj), np.finfo(float).tiny))
+            significant = is_pvalue_significant(row, result_filter)
+            y_value = -np.log10(max(float(pvalue), np.finfo(float).tiny))
             color = PALETTE["up"] if significant and lfc > lfc_cutoff else PALETTE["down"] if significant and lfc < -lfc_cutoff else PALETTE["ns"]
             points.append((float(lfc), float(y_value), color))
-            if significant:
+            if significant and abs(float(lfc)) >= lfc_cutoff:
                 feature_id = str(row.get("feature_key") or row.get("original_id") or "")
                 label = (display_labels or {}).get(feature_id, feature_id)
                 ranked.append((y_value * abs(float(lfc)), label, float(lfc), float(y_value)))
         fig, ax = plt.subplots(figsize=(6.2, 5.0), constrained_layout=True)
         if points:
             ax.scatter([item[0] for item in points], [item[1] for item in points], s=10, c=[item[2] for item in points], alpha=0.65, rasterized=len(points) > 5000)
-        ax.axvline(-lfc_cutoff, color="#4D4D4D", linestyle="--", linewidth=0.8)
-        ax.axvline(lfc_cutoff, color="#4D4D4D", linestyle="--", linewidth=0.8)
+        if lfc_cutoff > 0:
+            ax.axvline(-lfc_cutoff, color="#4D4D4D", linestyle="--", linewidth=0.8)
+            ax.axvline(lfc_cutoff, color="#4D4D4D", linestyle="--", linewidth=0.8)
+        if pvalue_threshold > 0:
+            ax.axhline(-np.log10(pvalue_threshold), color="#4D4D4D", linestyle="--", linewidth=0.8)
         ax.set_xlabel("Group difference (log2 expression scale)")
-        ax.set_ylabel("−log10(FDR)")
+        statistic_label = "FDR" if result_filter.pvalue_mode == "fdr" else "raw P value"
+        ax.set_ylabel(f"−log10({statistic_label})")
         ax.set_title("Differential expression volcano")
         ax.text(0.02, 0.98, cls._transform_label(plan), transform=ax.transAxes, va="top", fontsize=8, color="#4D4D4D")
         for _, label, x_value, y_value in sorted(ranked, reverse=True)[:10]:
@@ -303,11 +348,14 @@ class PlotService:
     ) -> Path:
         cls._style()
         rows = result.get("table", [])
+        result_filter = ResultFilterConfig.from_mapping(
+            result.get("active_result_filter", plan.result_filter.as_dict())
+        )
         row_by_id = {str(row.get("feature_key")): row for row in rows}
         selected = []
         for feature_id in feature_ids:
             row = row_by_id.get(feature_id, {})
-            if isinstance(row.get("padj"), (int, float)) and np.isfinite(row["padj"]) and row["padj"] < plan.config.fdr_threshold and isinstance(row.get("log2FoldChange"), (int, float)) and abs(row["log2FoldChange"]) >= plan.config.lfc_threshold:
+            if passes_result_filter(row, result_filter):
                 selected.append(feature_id)
         if not selected:
             selected = [feature_ids[index] for index in np.argsort(np.var(values, axis=1))[::-1][:plan.config.top_heatmap_features]]

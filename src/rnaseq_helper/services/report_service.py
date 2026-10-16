@@ -12,6 +12,8 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from rnaseq_helper.domain.models import AnalysisPlan, ExpressionMatrix, sha256_file
+from rnaseq_helper.analysis.result_filter import passes_result_filter, selected_pvalue, summarize_result
+from rnaseq_helper.domain.models import ResultFilterConfig
 
 
 class ReportService:
@@ -79,6 +81,14 @@ class ReportService:
             ),
             "analysis_plan_hash": sha256_file(analysis_artifact_dir / "analysis-plan.json"),
             "deg_result_hash": sha256_file(analysis_artifact_dir / "deg-result.json"),
+            "result_filter_hash": (
+                sha256_file(analysis_artifact_dir / "result-filter.json")
+                if (analysis_artifact_dir / "result-filter.json").is_file() else None
+            ),
+            "gene_annotations_hash": (
+                sha256_file(analysis_artifact_dir / "gene-annotations.tsv")
+                if (analysis_artifact_dir / "gene-annotations.tsv").is_file() else None
+            ),
             "html_hash": sha256_file(html_path),
             "xlsx_hash": sha256_file(xlsx_path),
             "figure_manifest_hash": (
@@ -102,47 +112,54 @@ class ReportService:
 
     @staticmethod
     def _write_html(path: Path, matrix: ExpressionMatrix, plan: AnalysisPlan, result: dict[str, Any], figures: dict[str, Path], interpretation: str, project_manifest: dict[str, Any]) -> None:
-        summary = result.get("summary", {})
-        rows = result.get("table", [])
-        headers = list(rows[0].keys()) if rows else []
-        body_rows = []
-        for row in rows:
-            body_rows.append(
-                "<tr>"
-                + "".join(
-                    f"<td>{ReportService._html_result_value(row.get(header))}</td>"
-                    for header in headers
-                )
-                + "</tr>"
-            )
-        summary_items = "".join(
-            f"<li>{html.escape(str(key))}: {html.escape(str(value))}</li>"
-            for key, value in summary.items()
+        active_filter = ResultFilterConfig.from_mapping(
+            result.get("active_result_filter") or plan.result_filter.as_dict()
+        )
+        rows = [row for row in result.get("table", []) if isinstance(row, dict)]
+        summary = result.get("display_summary") or summarize_result(rows, active_filter)
+        summary_labels = {
+            "feature_count": "结果特征总数", "tested_count": "完成统计检验的特征",
+            "not_tested_count": "未进入统计检验的特征", "significant_count": "达到显著性阈值的特征",
+            "significant_magnitude_count": "同时达到显著性与效应阈值的特征",
+            "up_count": "实验组较高", "down_count": "对照组较高",
+        }
+        metric_specs = (
+            ("tested_count", "完成统计检验"),
+            ("significant_magnitude_count", "符合当前筛选"),
+            ("up_count", "实验组较高"),
+            ("down_count", "对照组较高"),
+        )
+        metric_cards = "".join(
+            f'<div class="metric"><strong>{html.escape(str(summary.get(key, 0)))}</strong><span>{label}</span></div>'
+            for key, label in metric_specs
+        )
+        summary_rows = "".join(
+            f"<tr><th>{label}</th><td>{html.escape(str(summary.get(key, 0)))}</td></tr>"
+            for key, label in summary_labels.items() if key in summary
         )
         limitations = "".join(f"<li>{html.escape(item)}</li>" for item in plan.limitations_zh)
-        warnings = "".join(f"<li>{html.escape(item)}</li>" for item in plan.warnings) or "<li>无额外告警</li>"
+        warnings = "".join(f"<li>{html.escape(item)}</li>" for item in plan.warnings) or "<li>无额外分析告警</li>"
         result_issues = "".join(
-            f"<li>{html.escape(str(issue.get('severity', 'WARNING')))}：{html.escape(str(issue.get('message_zh', issue)))}</li>"
-            if isinstance(issue, dict) else f"<li>{html.escape(str(issue))}</li>"
-            for issue in result.get("issues", [])
-        ) or "<li>worker 未返回额外告警</li>"
+            f"<li>{html.escape(str(issue.get('message_zh', issue)))}</li>" if isinstance(issue, dict)
+            else f"<li>{html.escape(str(issue))}</li>" for issue in result.get("issues", [])
+        ) or "<li>未记录额外运行问题</li>"
         parameter_items = "".join(
-            f"<li>{html.escape(str(key))}: {html.escape(json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, (dict, list, tuple)) else str(value))}</li>"
+            f"<li><code>{html.escape(str(key))}</code>：{html.escape(json.dumps(value, ensure_ascii=False, default=str) if isinstance(value, (dict, list, tuple)) else str(value))}</li>"
             for key, value in result.get("parameters", {}).items()
-        ) or "<li>worker 未返回参数</li>"
+        ) or "<li>未记录</li>"
         diagnostic_items = "".join(
-            f"<li>{html.escape(ReportService._diagnostic_label(key))}: {html.escape(ReportService._format_diagnostic_value(key, value))}</li>"
+            f"<li>{html.escape(ReportService._diagnostic_label(key))}：{html.escape(ReportService._format_diagnostic_value(key, value))}</li>"
             for key, value in result.get("diagnostics", {}).items()
-        ) or "<li>worker 未返回诊断</li>"
+        ) or "<li>未记录额外诊断</li>"
         runtime_items = "".join(
-            f"<li>{html.escape(str(key))}: {html.escape(str(value))}</li>"
+            f"<li>{html.escape(str(key))}：{html.escape(str(value))}</li>"
             for key, value in result.get("runtime", {}).items()
-        ) or "<li>worker 未返回版本信息</li>"
+        ) or "<li>未记录运行环境版本</li>"
         contrast = plan.contrast if isinstance(plan.contrast, dict) else {}
         control_group = str(contrast.get("control", "")).strip()
         test_group = str(contrast.get("test", "")).strip()
         contrast_description = (
-            f"对比方向：{test_group} − {control_group}（正值表示测试组在模型尺度上高于对照组）"
+            f"实验组 {test_group} − 对照组 {control_group}（log2FoldChange > 0 表示实验组在模型尺度上较高）"
             if control_group and test_group
             else "对比方向：分析计划未记录完整的测试组与对照组，无法从报告确认"
         )
@@ -152,15 +169,32 @@ class ReportService:
         batches = plan.design.get("batch", {})
         subject_aliases = ReportService._factor_aliases(subjects, "个体")
         batch_aliases = ReportService._factor_aliases(batches, "批次")
-        assignment_items = "".join(
-            "<li>" + html.escape(str(sample)) + ": " + html.escape(str(group))
-            + (f"；配对个体 {html.escape(subject_aliases[subjects[sample]])}"
-               if sample in subjects and str(subjects[sample]).strip() else "")
-            + (f"；{html.escape(batch_aliases[batches[sample]])}"
-               if sample in batches and str(batches[sample]).strip() else "")
-            + "</li>"
-            for sample, group in assignments.items()
-        ) or "<li>无样本分组记录</li>"
+        assignment_items = ""
+        for group_key, group_title in ((control_group, "对照组"), (test_group, "实验组")):
+            if not group_key:
+                continue
+            members = [sample for sample, group in assignments.items() if group == group_key]
+            member_items = "".join(
+                "<li>" + html.escape(str(sample))
+                + (f"；配对个体 {html.escape(subject_aliases[subjects[sample]])}"
+                   if sample in subjects and str(subjects[sample]).strip() else "")
+                + (f"；{html.escape(batch_aliases[batches[sample]])}"
+                   if sample in batches and str(batches[sample]).strip() else "")
+                + "</li>" for sample in members
+            ) or "<li>未记录样本</li>"
+            assignment_items += (
+                f'<div class="card"><h3>{group_title}（{len(members)} 个）</h3>'
+                f'<p class="muted">组别标记：{html.escape(str(group_key))}</p><ul>{member_items}</ul></div>'
+            )
+        excluded_samples = [
+            sample for sample, group in assignments.items()
+            if group not in {control_group, test_group}
+        ]
+        excluded_items = "".join(f"<li>{html.escape(str(sample))}</li>" for sample in excluded_samples)
+        assignment_items += (
+            f'<div class="card"><h3>未纳入分析（{len(excluded_samples)} 个）</h3>'
+            f'<ul>{excluded_items or "<li>无</li>"}</ul></div>'
+        )
         replicate_structure_labels = {
             "independent": "已确认不同个体/独立生物样本",
             "paired": "已确认同一对象的配对/重复测量",
@@ -182,24 +216,40 @@ class ReportService:
             group: sum(assigned_group == group for assigned_group in assignments.values())
             for group in contrast_groups
         }
+        excluded_count = len(excluded_samples)
         if assignments and contrast_groups:
             analyzed_samples = sum(included_counts.values())
             sample_usage = (
                 f"分析纳入样本：{analyzed_samples}（"
-                + "；".join(f"{html.escape(str(group))} {count}" for group, count in included_counts.items())
-                + "）；未纳入的样本不参与本次统计。"
+                + "；".join(
+                    f"{('对照组' if group == control_group else '实验组')} {count}"
+                    for group, count in included_counts.items()
+                )
+                + f"）；未纳入 {excluded_count} 个样本。"
             )
         else:
             sample_usage = "分析纳入样本：无法从保存的分组计划确认。"
-        figure_links = "".join(
-            f"<li><a href=\"../figures/{html.escape(figure_path.name)}\">{html.escape(key)}</a>"
-            f"<br><img src=\"../figures/{html.escape(figure_path.name)}\" alt=\"{html.escape(key)}\" style=\"max-width:760px;width:100%;height:auto\"></li>"
-            for key, figure_path in figures.items()
-        )
+        figure_labels = {
+            "pca": ("样本整体差异（PCA）", "主成分压缩展示变换后表达的主要变异；点彼此接近表示整体表达谱相似，不代表因果或显著性。"),
+            "sample_correlation": ("样本相关性", "展示样本两两表达模式的相关程度；相关性高不等于生物学重复或实验设计正确。"),
+            "pvalue_histogram": ("原始 P 值分布", "仅展示完成检验特征的原始 P 值分布；应结合设计与多重检验结果解读，不能单独作为质量结论。"),
+            "volcano": ("差异效应与显著性（火山图）", "横轴为 log2FoldChange，纵轴为 −log10(P)；显著性使用当前筛选所选 P 值类型。"),
+            "top_heatmap": ("优先差异特征表达热图", "展示按当前筛选选出的特征及模型使用的变换后表达；行内标准化用于模式比较，不表示绝对表达量。"),
+        }
+        figure_sections = []
+        for key, figure_path in figures.items():
+            title, caption = figure_labels.get(key, (key.replace("_", " "), "图形用于辅助探索，不替代统计检验与实验设计核对。"))
+            rel = "../figures/" + html.escape(figure_path.name, quote=True)
+            figure_sections.append(
+                f'<figure><img src="{rel}" alt="{html.escape(title, quote=True)}">'
+                f'<figcaption><strong>{html.escape(title)}</strong><p>{html.escape(caption)}</p>'
+                f'<a href="{rel}">单独打开原图</a></figcaption></figure>'
+            )
+        figure_html = "".join(figure_sections) or '<p class="muted">本项目未提供图表文件。</p>'
         provenance_items = "".join(
-            f"<li>{html.escape(str(key))}: {html.escape(str(value))}</li>"
+            f"<li>{html.escape(str(key))}：{html.escape(str(value))}</li>"
             for key, value in {
-                "来源文件": project_manifest.get("source_path", ""),
+                "来源文件名": Path(str(project_manifest.get("source_path", ""))).name,
                 "平台": matrix.platform_id or project_manifest.get("platform_id", ""),
                 "来源平台类别": matrix.source_modality or project_manifest.get("source_modality", ""),
                 "参考结果": project_manifest.get("reference_result", "未使用本地参考表"),
@@ -213,25 +263,49 @@ class ReportService:
             if isinstance(issue, dict) else f"<li>{html.escape(str(issue))}</li>"
             for issue in validation.get("issues", [])
         ) or "<li>整理验证无额外记录</li>"
+        selected_rows = [row for row in rows if passes_result_filter(row, active_filter)]
+
+        def representative_rows(direction: str) -> str:
+            directional = [
+                row for row in selected_rows
+                if (float(row["log2FoldChange"]) > 0 if direction == "positive" else float(row["log2FoldChange"]) < 0)
+            ]
+            directional.sort(key=lambda row: (
+                selected_pvalue(row, active_filter) is None,
+                selected_pvalue(row, active_filter) or 0.0,
+                str(row.get("feature_key", "")),
+            ))
+            top_rows = directional[:10]
+            return "".join(
+                "<tr>" + "".join(
+                    f"<td>{ReportService._html_result_value(row.get(key))}</td>"
+                    for key in ReportService.RESULT_EXPORT_COLUMNS
+                ) + "</tr>" for row in top_rows
+            ) or '<tr><td colspan="5">当前筛选条件下没有符合方向的特征。</td></tr>'
+
+        positive_rows_html = representative_rows("positive")
+        negative_rows_html = representative_rows("negative")
+        p_label = "FDR（BH 校正后 P 值）" if active_filter.pvalue_mode == "fdr" else "原始 P 值（未校正）"
+        selected_clause = f"{p_label} &lt; {active_filter.pvalue_threshold:g}，且 |log2FoldChange| ≥ {active_filter.log2fc_threshold:g}"
+        analysis_name = str(project_manifest.get("analysis_name") or "差异表达分析")
         document = f"""<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>RNA-Seq Helper 分析报告</title>
-<style>body{{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;color:#111;max-width:1400px;margin:32px auto;padding:0 24px}}h1{{font-size:24px}}h2{{font-size:17px;margin-top:28px;border-bottom:1px solid #bbb;padding-bottom:6px}}table{{border-collapse:collapse;width:100%;font-size:12px}}th{{background:#243b53;color:#fff;text-align:left;position:sticky;top:0}}th,td{{padding:5px 7px;border-bottom:1px solid #ddd;white-space:nowrap}}.note{{background:#fff7d6;padding:10px;border-left:4px solid #c28a00}}</style></head>
-<body><h1>RNA-Seq Helper 分析报告</h1>
-<p>本报告基于本地项目中的已整理表达矩阵，HTML 不依赖远程脚本或网络资源。</p>
-<h2>本次分析</h2><ul><li>方法：{html.escape(plan.method)}</li><li>Profile：{html.escape(plan.method_profile_id)}</li><li>{html.escape(contrast_description)}</li><li>样本关系：{html.escape(replicate_structure)}</li><li>完整矩阵：{matrix.values.shape[0]} 个特征 × {matrix.values.shape[1]} 个样本列</li><li>{sample_usage}</li><li>矩阵哈希：{html.escape(matrix.content_hash)}</li></ul>
-<h2>结果摘要</h2><ul>{summary_items}</ul>
-<div class="note">模型效应是组间模型尺度差异，不等同于原尺度算术均值之比。NA 保留，并在 reason_not_tested 中记录原因。</div>
-<h2>方法与限制</h2><p>{html.escape(plan.method_reason_zh)}</p><p>{html.escape(transform_description)}</p><ul>{limitations}</ul>
-<h2>来源与参考</h2><ul>{provenance_items or "<li>未记录额外来源信息</li>"}</ul>
-<h2>整理验证</h2><ul>{validation_items}</ul>
-<h2>中文解读（审计模板）</h2><pre>{html.escape(interpretation)}</pre>
-<h2>样本安排</h2><ul>{assignment_items}</ul>
-{factor_privacy_note}
-<h2>实际参数与运行版本</h2><ul>{parameter_items}</ul><ul>{runtime_items}</ul>
-<h2>质量诊断与告警</h2><ul>{diagnostic_items}</ul><ul>{warnings}</ul><ul>{result_issues}</ul>
-<h2>图表</h2><ul>{figure_links}</ul>
-<h2>完整结果表</h2><table><thead><tr>{"".join(f"<th>{html.escape(header)}</th>" for header in headers)}</tr></thead><tbody>{"".join(body_rows)}</tbody></table>
-</body></html>"""
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><title>{html.escape(analysis_name)}｜RNA-Seq Helper 分析报告</title>
+<style>
+:root{{color-scheme:light;--ink:#17212b;--muted:#536577;--line:#d7e0e7;--paper:#fff;--wash:#f3f7fa;--accent:#1668a8;--soft:#eaf3fa}}
+*{{box-sizing:border-box}}html{{background:#edf1f4}}body{{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;color:var(--ink);background:var(--paper);max-width:1040px;margin:28px auto;padding:48px 62px;line-height:1.65;box-shadow:0 8px 32px #243b531c}}
+h1{{font-size:30px;line-height:1.25;margin:0 0 10px}}h2{{font-size:20px;margin:34px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line)}}h3{{font-size:16px;margin:20px 0 8px}}p{{margin:8px 0}}.eyebrow{{color:var(--accent);font-weight:700;letter-spacing:.06em}}.lead{{font-size:16px;color:var(--muted)}}.meta{{color:var(--muted);font-size:14px}}.metrics{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0}}.metric{{background:var(--wash);border:1px solid var(--line);border-radius:10px;padding:15px}}.metric strong{{display:block;font-size:26px;color:var(--accent)}}.metric span{{font-size:13px;color:var(--muted)}}.callout{{background:var(--soft);border-left:4px solid var(--accent);padding:14px 16px;margin:18px 0;border-radius:4px}}.grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px}}.card{{border:1px solid var(--line);border-radius:10px;padding:16px;background:#fff}}table{{width:100%;border-collapse:collapse;margin:12px 0;font-size:14px}}th,td{{text-align:left;vertical-align:top;padding:9px 11px;border-bottom:1px solid var(--line)}}th{{background:var(--wash)}}.result-table{{font-size:12px;table-layout:fixed;overflow-wrap:anywhere}}.result-table th:nth-child(1){{width:24%}}.result-table th:nth-child(2){{width:20%}}.result-table th:nth-child(n+3){{width:18.6%}}figure{{margin:18px 0 26px;break-inside:avoid;border:1px solid var(--line);border-radius:10px;padding:14px}}figure img{{display:block;max-width:100%;height:auto;margin:auto}}figcaption{{margin-top:12px;color:var(--muted);font-size:14px}}figcaption strong{{color:var(--ink);font-size:16px}}figcaption p{{margin:4px 0}}a{{color:var(--accent)}}.muted{{color:var(--muted)}}pre{{white-space:pre-wrap;background:var(--wash);padding:16px;border-radius:8px;font:inherit}}details{{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin-top:20px}}summary{{cursor:pointer;font-weight:700}}.technical{{font-size:13px;overflow-wrap:anywhere}}footer{{margin-top:40px;padding-top:14px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}}
+@media(max-width:720px){{body{{margin:0;padding:26px 20px}}.metrics{{grid-template-columns:repeat(2,1fr)}}.grid{{grid-template-columns:1fr}}}}
+@page{{size:A4;margin:15mm}}@media print{{html{{background:#fff}}body{{max-width:none;margin:0;padding:0;box-shadow:none;font-size:10.5pt}}h1{{font-size:24pt}}h2{{font-size:15pt;break-after:avoid}}h3{{break-after:avoid}}.card,.metric,figure,table{{break-inside:avoid}}a{{color:inherit;text-decoration:none}}.no-print{{display:none}}}}
+</style></head><body>
+<header><p class="eyebrow">RNA-Seq Helper · 离线分析报告</p><h1>{html.escape(analysis_name)}</h1><p class="lead">{html.escape(contrast_description)}</p><p class="meta">分析方法：{html.escape(plan.method)} · 样本关系：{html.escape(replicate_structure)}</p></header>
+<section><h2>核心结果</h2><div class="metrics">{metric_cards}</div><p>当前筛选：{selected_clause}。</p><p>矩阵包含 {matrix.values.shape[0]} 个特征、{matrix.values.shape[1]} 列样本；{sample_usage}</p><p class="meta">统计结果保存在同目录的 <a href="deg-results.xlsx">deg-results.xlsx</a>（完整结果表，仅含约定的五列）。</p><div class="callout">模型效应是当前模型尺度上的组间差异，不等同于原始线性表达均值比，也不证明因果关系。未检测特征及缺失统计值不会被改写或删除。</div><table><tbody>{summary_rows}</tbody></table></section>
+<section><h2>代表性结果</h2><p>按当前筛选条件分别展示 log2FoldChange 正值和负值的特征；每个方向按所选 P 值从小到大最多列出 10 个。完整统计结果请打开 XLSX。</p><div class="grid"><div class="card"><h3>log2FoldChange &gt; 0 · 实验组较高</h3><table class="result-table"><thead><tr>{''.join(f'<th>{html.escape(key)}</th>' for key in ReportService.RESULT_EXPORT_COLUMNS)}</tr></thead><tbody>{positive_rows_html}</tbody></table></div><div class="card"><h3>log2FoldChange &lt; 0 · 对照组较高</h3><table class="result-table"><thead><tr>{''.join(f'<th>{html.escape(key)}</th>' for key in ReportService.RESULT_EXPORT_COLUMNS)}</tr></thead><tbody>{negative_rows_html}</tbody></table></div></div></section>
+<section><h2>图表与解读</h2>{figure_html}</section>
+<section><h2>中文解读</h2><pre>{html.escape(interpretation)}</pre></section>
+<section><h2>样本分组</h2><p>{html.escape(replicate_structure)}；仅对照组和实验组进入本次比较，其余样本不参与统计。</p><div class="grid">{assignment_items}</div>{factor_privacy_note}</section>
+<section><h2>方法与限制</h2><p>{html.escape(plan.method_reason_zh)}</p><p>{html.escape(transform_description)}</p><ul>{limitations}</ul><p>完成统计检验：{summary.get('tested_count', 0)}；未进入检验：{summary.get('not_tested_count', 0)}。统计筛选只影响展示，不改变原始统计模型或统计列。</p></section>
+<details><summary>技术附录：来源、参数、软件版本与质量记录</summary><div class="technical"><h3>来源与整理验证</h3><ul>{provenance_items or '<li>未记录额外来源信息</li>'}</ul><ul>{validation_items}</ul><h3>统计参数与运行环境</h3><ul>{parameter_items}</ul><ul>{runtime_items}</ul><h3>质量诊断</h3><ul>{diagnostic_items}</ul><ul>{warnings}</ul><ul>{result_issues}</ul><p>方法配置：<code>{html.escape(plan.method_profile_id)}</code></p><p>矩阵 SHA-256：<code>{html.escape(matrix.content_hash)}</code></p></div></details>
+<footer>本报告为本地生成的静态 HTML，不加载网络资源。图表文件与本报告保持相对目录结构时可离线查看及打印。</footer></body></html>"""
         path.write_text(document, encoding="utf-8")
 
     @staticmethod
@@ -311,14 +385,21 @@ class ReportService:
 
     @staticmethod
     def _interpretation(matrix: ExpressionMatrix, plan: AnalysisPlan, result: dict[str, Any]) -> str:
-        summary = result.get("summary", {})
+        active_filter = result.get("active_result_filter")
+        from rnaseq_helper.domain.models import ResultFilterConfig
+        result_filter = ResultFilterConfig.from_mapping(active_filter or plan.result_filter.as_dict())
+        summary = result.get("display_summary") or summarize_result(
+            result.get("table", []), result_filter,
+        )
         significant = int(summary.get("significant_magnitude_count", 0) or 0)
         tested = int(summary.get("tested_count", 0) or 0)
         direction = f"上调 {summary.get('up_count', 0)} 个、下调 {summary.get('down_count', 0)} 个"
+        p_name = "FDR（BH 校正后 P 值）" if result_filter.pvalue_mode == "fdr" else "原始 P 值（未校正）"
+        criterion = f"{p_name} < {result_filter.pvalue_threshold:g} 且 |模型效应|≥{result_filter.log2fc_threshold:g}"
         if significant:
-            finding = f"在预设 FDR<{plan.config.fdr_threshold} 且 |模型效应|≥{plan.config.lfc_threshold} 的规则下，共有 {significant} 个特征达到筛选条件（{direction}）。"
+            finding = f"按当前结果筛选规则 {criterion}，共有 {significant} 个特征达到条件（{direction}）。"
         else:
-            finding = f"在预设 FDR<{plan.config.fdr_threshold} 且 |模型效应|≥{plan.config.lfc_threshold} 的规则下，没有特征同时达到筛选条件。"
+            finding = f"按当前结果筛选规则 {criterion}，没有特征同时达到条件。"
         basis = "原始 count 计数模型（DESeq2）" if plan.analysis_basis == "raw_count" else "标准化表达值的 log 表达模型（limma-trend）"
         contrast = plan.contrast if isinstance(plan.contrast, dict) else {}
         control_group = str(contrast.get("control", "")).strip()
@@ -339,6 +420,8 @@ class ReportService:
             f"分析基础：{basis}；本次有效检验特征数：{tested}。",
             contrast_direction,
             finding,
+            "上述阈值只用于结果筛选，不会改变统计模型、原始 P 值、FDR 或模型效应；原始统计列均保留。",
+            *( ["注意：使用未校正的原始 P 值筛选，未控制多重检验带来的假阳性风险。"] if result_filter.pvalue_mode == "pvalue" else [] ),
             "模型效应表示对比方向上的模型尺度差异，不直接等同于原尺度算术均值之比，也不证明因果关系。",
             limitation,
             warning_line,

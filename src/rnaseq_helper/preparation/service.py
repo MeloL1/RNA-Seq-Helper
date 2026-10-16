@@ -234,6 +234,8 @@ class PreparationService:
             issues.append(Issue("DUPLICATE_FEATURE_IDS", IssueSeverity.BLOCKING, "特征编号重复；软件不会静默合并重复编号。", "请核实重复行的含义"))
         numeric_count = 0
         total_rows = len(matrix)
+        invalid_raw_count_cells = 0
+        invalid_raw_count_rows: list[int] = []
         for index, (row_number, row) in enumerate(
             zip(range(session.recipe.data_start_row + 1, session.recipe.data_start_row + 1 + total_rows), matrix)
         ):
@@ -256,7 +258,9 @@ class PreparationService:
                 numeric_count += 1
                 if session.recipe.measurement_type == MeasurementType.RAW_COUNT:
                     if number < 0 or not number.is_integer():
-                        issues.append(Issue("INVALID_RAW_COUNT", IssueSeverity.BLOCKING, f"第 {row_number} 行含负数或非整数 count。", "请确认原始 count 文件而不是四舍五入后的表达表"))
+                        invalid_raw_count_cells += 1
+                        if row_number not in invalid_raw_count_rows and len(invalid_raw_count_rows) < 6:
+                            invalid_raw_count_rows.append(row_number)
                     elif number > 2_147_483_647:
                         issues.append(Issue(
                             "RAW_COUNT_EXCEEDS_INTEGER_RANGE",
@@ -266,6 +270,14 @@ class PreparationService:
                         ))
                 if session.recipe.value_scale == ValueScale.LINEAR and number < 0:
                     issues.append(Issue("NEGATIVE_LINEAR_VALUE", IssueSeverity.BLOCKING, f"第 {row_number} 行含线性尺度负值。", "请核实是否已取 log 或数据是否损坏"))
+        if invalid_raw_count_cells:
+            example_rows = "、".join(str(value) for value in invalid_raw_count_rows)
+            issues.append(Issue(
+                "INVALID_RAW_COUNT",
+                IssueSeverity.BLOCKING,
+                f"这张 count 表有 {invalid_raw_count_cells:,} 个负数或非整数值（例如第 {example_rows} 行）。",
+                "它不能直接用于 DESeq2。不要四舍五入；请改用有明确单位的 TPM/FPKM 表，或向提供方索取整数 count。",
+            ))
         self._raise_if_cancelled(cancelled)
         if progress is not None:
             progress(total_rows, total_rows)
@@ -544,6 +556,7 @@ class PreparationService:
             measurement_provenance=self._measurement_provenance(session.recipe.fact_confirmations),
             platform_id=platform_id,
             source_modality=source_modality,
+            source_path=session.recipe.source_path,
         )
 
     @staticmethod

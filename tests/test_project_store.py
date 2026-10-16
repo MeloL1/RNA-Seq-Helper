@@ -158,6 +158,44 @@ def test_load_saved_project_is_read_only_and_restores_matching_plan_and_result(t
     assert {path.relative_to(project): path.read_bytes() for path in project.rglob("*") if path.is_file()} == before
 
 
+def test_moved_project_ignores_stale_absolute_report_links_and_restores_from_local_files(
+    tmp_path: Path,
+) -> None:
+    original = tmp_path / "original" / "project"
+    original.parent.mkdir()
+    original.mkdir()
+    _write_project(original)
+    manifest_path = original / "reports" / "analysis-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update({
+        "html": str(original / "reports" / "analysis-report.html"),
+        "xlsx": str(original / "reports" / "deg-results.xlsx"),
+        "figures": {
+            key: str(original / "figures" / filename)
+            for key, filename in {
+                "pca": "pca.png",
+                "sample_correlation": "sample-correlation.png",
+                "pvalue_histogram": "p-value-histogram.png",
+                "volcano": "volcano.png",
+                "top_heatmap": "top-heatmap.png",
+            }.items()
+        },
+    })
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    relocated = tmp_path / "relocated" / "project"
+    relocated.parent.mkdir()
+    original.rename(relocated)
+
+    snapshot = ProjectStore.load(relocated)
+
+    assert snapshot.project_dir == relocated
+    assert snapshot.report_path == relocated / "reports" / "analysis-report.html"
+    assert snapshot.result_integrity_valid is True
+    assert snapshot.report_valid is True
+    assert snapshot.saved_result is not None
+
+
 def test_restore_preserves_cell_observation_unit_from_project_manifest(tmp_path: Path) -> None:
     project = tmp_path / "cell-project"
     project.mkdir()
@@ -208,6 +246,63 @@ def test_invalid_original_source_path_does_not_prevent_read_only_recovery(tmp_pa
 
     assert snapshot.saved_result is not None
     assert any("原始来源文件当前无法访问" in warning for warning in snapshot.warnings)
+
+
+def test_legacy_geo_array_project_restores_modality_and_blocks_fpkm_reanalysis(tmp_path: Path) -> None:
+    project = tmp_path / "legacy-geo-array"
+    project.mkdir()
+    _write_project(project)
+
+    sample_path = project / "prepared" / "sample_metadata.tsv"
+    sample_path.write_text(
+        "sample_id\tsample_title\tdata_processing\tsupplementary_file\n"
+        "S1\tarray sample 1\tAffymetrix STATISTICAL_ALGORITHM_TYPE\thttps://example.invalid/S1.CEL.gz\n"
+        "S2\tarray sample 2\tAffymetrix STATISTICAL_ALGORITHM_TYPE\thttps://example.invalid/S2.CEL.gz\n",
+        encoding="utf-8",
+    )
+    manifest_path = project / "project.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["platform_id"] = "GPL96"
+    manifest["source_asset"] = {"kind": "GEO_SERIES_MATRIX"}
+    manifest.pop("source_modality", None)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    recipe_path = project / "preparation-recipe.json"
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    recipe.update({"measurement_type": "FPKM", "value_scale": "LINEAR"})
+    recipe["fact_confirmations"] = [
+        {"fact_key": "measurement_type", "selected_value": "FPKM", "status": "user_confirmed_without_direct_text"},
+        {"fact_key": "value_scale", "selected_value": "LINEAR", "status": "user_confirmed_without_direct_text"},
+    ]
+    recipe_path.write_text(json.dumps(recipe), encoding="utf-8")
+
+    snapshot = ProjectStore.load(project)
+    assert snapshot.matrix.source_modality == "MICROARRAY"
+    assert any("Affymetrix 处理说明和 CEL 来源文件" in warning for warning in snapshot.warnings)
+
+    plan = PlanningService().build(
+        snapshot.matrix,
+        {"S1": "control", "S2": "test"},
+        replicate_structure="independent",
+    )
+    assert not plan.runnable
+    assert any(issue.code == "SOURCE_MODALITY_MEASUREMENT_CONFLICT" for issue in plan.blockers)
+
+
+def test_legacy_modality_inference_does_not_guess_from_generic_geo_or_gpl_alone(tmp_path: Path) -> None:
+    sample_path = tmp_path / "sample_metadata.tsv"
+    sample_path.write_text("sample_id\tplatform_id\nS1\tGPL96\n", encoding="utf-8")
+
+    ordinary_geo, reason = ProjectStore._infer_legacy_source_modality(
+        {"source_asset": {"kind": "GEO_SERIES_MATRIX"}, "platform_id": "GPL96"},
+        sample_path,
+    )
+    stale_non_geo, stale_reason = ProjectStore._infer_legacy_source_modality(
+        {"source_asset": {"kind": "USER_TABLE"}, "series_types": ["Expression profiling by array"]},
+        sample_path,
+    )
+
+    assert ordinary_geo is None and not reason
+    assert stale_non_geo is None and not stale_reason
 
 
 def test_changed_original_source_warns_but_keeps_saved_result_readable(tmp_path: Path) -> None:

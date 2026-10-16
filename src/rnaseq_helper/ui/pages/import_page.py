@@ -16,7 +16,7 @@ from rnaseq_helper.readers.geo_reader import GeoSeriesMatrix
 from rnaseq_helper.readers.tenx_reader import TenXBundle, TenXReader, TenXReadError
 from rnaseq_helper.ui.workers.import_worker import ImportProgress, ImportTaskWorker
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import QSettings, Qt, QThread, Signal, Slot
 from PySide6.QtWidgets import (
     QFileDialog, QFileSystemModel, QLineEdit,
     QComboBox, QDialog, QDialogButtonBox, QGridLayout, QGroupBox, QLayout,
@@ -364,7 +364,7 @@ class ImportPage(QWidget):
         layout.setContentsMargins(18, 14, 18, 14)
         layout.setSpacing(10)
         title = QLabel("导入表达矩阵")
-        title.setStyleSheet("font-size: 20px; font-weight: 600;")
+        title.setObjectName("pageTitle")
         layout.addWidget(title)
         layout.addWidget(QLabel("第 1 步选择文件，第 2 步确认整理；软件只读取原文件，结果保存到独立项目目录。"))
 
@@ -439,12 +439,12 @@ class ImportPage(QWidget):
             "选好文件后，这里会显示软件建议；如果和原始说明不一样，请改下拉框。"
         )
         self.auto_judgement.setWordWrap(True)
-        self.auto_judgement.setStyleSheet("color: #245; padding: 4px 0;")
+        self.auto_judgement.setObjectName("recognitionSummary")
         self.organize_auto_judgement = QLabel(
             "选好文件后，这里会显示软件建议；如果和原始说明不一样，请改下拉框。"
         )
         self.organize_auto_judgement.setWordWrap(True)
-        self.organize_auto_judgement.setStyleSheet("color: #245; padding: 4px 0;")
+        self.organize_auto_judgement.setObjectName("recognitionSummary")
         self.current_thumbnail = QLabel()
         self.current_thumbnail.setFixedHeight(126)
         self.current_thumbnail.setToolTip("当前表格的离线缩略图；只显示少量单元格，不代替全量验证")
@@ -644,7 +644,7 @@ class ImportPage(QWidget):
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(10)
         title = QLabel("加入并确认表达数据")
-        title.setStyleSheet("font-size: 20px; font-weight: 700;")
+        title.setObjectName("pageTitle")
         layout.addWidget(title)
         layout.addWidget(QLabel("原文件只读；先选表达表，再确认基因编号、样本和数值说明。"))
 
@@ -662,16 +662,13 @@ class ImportPage(QWidget):
         import_layout.setSpacing(10)
         drop_zone = QWidget()
         drop_zone.setObjectName("importDropZone")
-        drop_zone.setStyleSheet(
-            "#importDropZone { background:#ffffff; border:2px dashed #555; border-radius:10px; }"
-        )
         drop_layout = QVBoxLayout(drop_zone)
         drop_layout.setContentsMargins(16, 12, 16, 12)
         drop_layout.setSpacing(8)
         self.drop_hint = QLabel("把交付文件或文件夹拖到这里\n也可以点击下方按钮选择多个文件")
         self.drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.drop_hint.setWordWrap(True)
-        self.drop_hint.setStyleSheet("font-size:16px; font-weight:600; border:0;")
+        self.drop_hint.setObjectName("dropHint")
         drop_layout.addWidget(self.drop_hint)
         choices = QHBoxLayout()
         choices.addStretch(1)
@@ -719,8 +716,10 @@ class ImportPage(QWidget):
         self.asset_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
         self.asset_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.asset_table.setColumnWidth(0, 235)
-        self.asset_table.setColumnWidth(1, 175)
-        self.asset_table.setColumnWidth(2, 120)
+        # 识别结论和预览维度是导入清单的关键信息，给出更实用的初始宽度；
+        # 仍保留 Interactive，用户可按当前窗口与文件内容自行调整。
+        self.asset_table.setColumnWidth(1, 270)
+        self.asset_table.setColumnWidth(2, 190)
         self.asset_table.itemSelectionChanged.connect(self._asset_selection_changed)
         import_layout.addWidget(self.asset_table, 1)
 
@@ -771,7 +770,7 @@ class ImportPage(QWidget):
         organize_layout.setContentsMargins(4, 4, 4, 4)
         organize_layout.setSpacing(8)
         self.question_label = QLabel("确认表格")
-        self.question_label.setStyleSheet("font-size:17px; font-weight:700;")
+        self.question_label.setObjectName("sectionTitle")
         organize_layout.addWidget(self.question_label)
         self.organize_auto_judgement = QLabel("")
         self.organize_auto_judgement.setWordWrap(True)
@@ -780,13 +779,15 @@ class ImportPage(QWidget):
         )
         organize_layout.addWidget(self.organize_auto_judgement)
 
-        self.organize_tabs = QStackedWidget()
+        self.organize_tabs = QWidget()
         self.organize_tabs.setObjectName("tableQuestions")
-        self._question_titles = (
-            "确认表格结构",
-            "确认每个格子的数值",
-            "确认基因编号与样本列",
+        self.organize_tabs.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum
         )
+        self.organize_sections_layout = QVBoxLayout(self.organize_tabs)
+        self.organize_sections_layout.setContentsMargins(0, 0, 0, 0)
+        self.organize_sections_layout.setSpacing(12)
+        self._question_titles = ("检查数据",)
         layout_page = QWidget()
         structure_page_layout = QVBoxLayout(layout_page)
         structure_page_layout.setContentsMargins(12, 10, 12, 10)
@@ -850,8 +851,7 @@ class ImportPage(QWidget):
         structure_page_layout.addWidget(self.structure_why)
         structure_page_layout.addWidget(self.structure_edit_toggle)
         structure_page_layout.addWidget(self.structure_controls)
-        structure_page_layout.addStretch(1)
-        self.organize_tabs.addWidget(layout_page)
+        self.organize_sections_layout.addWidget(layout_page)
 
         facts_page = QWidget()
         facts_layout = QVBoxLayout(facts_page)
@@ -905,7 +905,7 @@ class ImportPage(QWidget):
         self.use_evidence_button.setVisible(False)
         self.use_evidence_button.clicked.connect(self._accept_text_evidence)
         self.short_fact_hint = QLabel(
-            "请对照交付说明确认：每个格子的数值是什么、是否取过对数。仅看整数或小数长相不能判断。"
+            "不符合文件说明时，可直接修改上方选择。"
         )
         self.short_fact_hint.setWordWrap(True)
         facts_form = QGridLayout()
@@ -954,8 +954,7 @@ class ImportPage(QWidget):
         self.facts_hint.setVisible(False)
         self.fact_explanation_toggle.toggled.connect(self.facts_hint.setVisible)
         facts_layout.addWidget(self.facts_hint)
-        facts_layout.addStretch(1)
-        self.organize_tabs.addWidget(facts_page)
+        self.organize_sections_layout.addWidget(facts_page)
 
         roles_page = QWidget()
         roles_layout = QVBoxLayout(roles_page)
@@ -1001,7 +1000,7 @@ class ImportPage(QWidget):
         roles_editor_layout.addWidget(self.column_roles)
         roles_layout.addWidget(self.roles_editor, 1)
         self.roles_edit_toggle.toggled.connect(self._toggle_roles_editor)
-        self.organize_tabs.addWidget(roles_page)
+        self.organize_sections_layout.addWidget(roles_page)
         self.organize_layout_index = 0
         self.organize_facts_index = 1
         self.organize_roles_index = 2
@@ -1034,7 +1033,6 @@ class ImportPage(QWidget):
         content_layout.setSpacing(8)
         content_layout.addWidget(self.organize_tabs)
         content_layout.addWidget(preview_box)
-        content_layout.addStretch(1)
         scroll = QScrollArea()
         scroll.setObjectName("organizeContentScroll")
         scroll.setWidgetResizable(True)
@@ -1090,21 +1088,11 @@ class ImportPage(QWidget):
     def advance_question(self) -> None:
         if self.session is None:
             return
-        index = self.organize_tabs.currentIndex()
-        if index < self.organize_tabs.count() - 1:
-            self.organize_tabs.setCurrentIndex(index + 1)
-            self._update_question_state()
-            return
         self.finish_preparation()
 
     @Slot()
     def _back_question(self) -> None:
-        index = self.organize_tabs.currentIndex()
-        if index > 0:
-            self.organize_tabs.setCurrentIndex(index - 1)
-            self._update_question_state()
-        else:
-            self.workflowStepRequested.emit(0)
+        self.workflowStepRequested.emit(0)
 
     @staticmethod
     def _prepare_file_dialog(dialog: QFileDialog) -> None:
@@ -1115,12 +1103,32 @@ class ImportPage(QWidget):
         if file_name_edit is not None:
             file_name_edit.setCompleter(None)
 
+    @staticmethod
+    def _last_selected_folder(fallback: Path | None = None) -> Path:
+        settings = QSettings("RNA-Seq Helper", "RNA-Seq Helper")
+        saved = str(settings.value("file-dialog/last-selected-folder", "") or "")
+        candidate = Path(saved).expanduser() if saved else None
+        if candidate is not None and candidate.is_dir():
+            return candidate
+        if fallback is not None and Path(fallback).is_dir():
+            return Path(fallback)
+        return Path.home()
+
+    @staticmethod
+    def _remember_selected_folder(path: Path, *, is_directory: bool = False) -> None:
+        selected = Path(path).expanduser()
+        folder = selected if is_directory else selected.parent
+        if folder.is_dir():
+            settings = QSettings("RNA-Seq Helper", "RNA-Seq Helper")
+            settings.setValue("file-dialog/last-selected-folder", str(folder))
+            settings.sync()
+
     @Slot()
     def choose_file(self) -> None:
         dialog = QFileDialog(
             self,
             "选择交付文件（可多选）",
-            str(Path.home()),
+            str(self._last_selected_folder()),
         )
         dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
         dialog.setNameFilter(
@@ -1128,40 +1136,56 @@ class ImportPage(QWidget):
         )
         self._prepare_file_dialog(dialog)
         if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.load_paths(tuple(Path(path) for path in dialog.selectedFiles()))
+            paths = tuple(Path(path) for path in dialog.selectedFiles())
+            if paths:
+                self._remember_selected_folder(paths[0])
+                self.load_paths(paths)
 
     @Slot()
     def choose_project(self) -> None:
-        dialog = QFileDialog(self, "打开已保存的 RNA-Seq Helper 项目", str(self.project_root))
+        dialog = QFileDialog(
+            self,
+            "打开已保存的 RNA-Seq Helper 项目",
+            str(self._last_selected_folder(self.project_root)),
+        )
         dialog.setFileMode(QFileDialog.FileMode.Directory)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
         self._prepare_file_dialog(dialog)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selectedFiles():
-            self.projectOpenRequested.emit(dialog.selectedFiles()[0])
+            selected = Path(dialog.selectedFiles()[0])
+            self._remember_selected_folder(selected, is_directory=True)
+            self.projectOpenRequested.emit(str(selected))
 
     @Slot()
     def choose_10x_directory(self) -> None:
-        dialog = QFileDialog(self, "选择包含 10x 三件套的目录", str(Path.home()))
+        dialog = QFileDialog(
+            self,
+            "选择包含 10x 三件套的目录",
+            str(self._last_selected_folder()),
+        )
         dialog.setFileMode(QFileDialog.FileMode.Directory)
         dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
         self._prepare_file_dialog(dialog)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             paths = dialog.selectedFiles()
             if paths:
-                self.load_paths((Path(paths[0]),))
+                selected = Path(paths[0])
+                self._remember_selected_folder(selected, is_directory=True)
+                self.load_paths((selected,))
 
     @Slot()
     def choose_reference(self) -> None:
         dialog = QFileDialog(
             self,
             "选择本地基因注释参考表",
-            str(Path.home()),
+            str(self._last_selected_folder()),
         )
         dialog.setFileMode(QFileDialog.FileMode.ExistingFile)
         dialog.setNameFilter("参考表 (*.csv *.tsv *.txt *.xls *.xlsx *.xlsm *.soft *.annot *.bgx *.gz);;所有文件 (*)")
         self._prepare_file_dialog(dialog)
         if dialog.exec() == QDialog.DialogCode.Accepted and dialog.selectedFiles():
             self.reference_path = Path(dialog.selectedFiles()[0])
+            self._remember_selected_folder(self.reference_path)
             self.reference_label.setText(str(self.reference_path))
             if self.session is not None:
                 self.session = replace(self.session, reference_path=self.reference_path)
@@ -1506,7 +1530,7 @@ class ImportPage(QWidget):
             for column in range(4):
                 item = self.asset_table.item(row, column)
                 if item is not None:
-                    item.setToolTip("\n".join(str(path) for path in asset.source_paths))
+                    item.setToolTip(item.text() + ("\n" + "\n".join(str(path) for path in asset.source_paths) if column == 0 else ""))
         self._update_asset_action()
 
     def _select_recommended_asset(self) -> None:
@@ -1788,7 +1812,6 @@ class ImportPage(QWidget):
         self.roles_edit_toggle.setChecked(False)
         self.file_label.setText(asset.source_paths[0].name)
         self._apply_auto_judgement(asset)
-        self.organize_tabs.setCurrentIndex(0)
         self.step_tabs.setCurrentIndex(1)
         self._refresh_controls()
         self.stepAvailabilityChanged.emit(1, True)
@@ -1894,15 +1917,17 @@ class ImportPage(QWidget):
         self._update_action_state()
 
     def _apply_auto_judgement(self, asset: DataAsset) -> None:
-        """显示有证据等级的候选判断，但不替用户确认单位或转换。"""
+        """把明确的文件/原文线索作为可修改的默认选择。"""
         self._judgement_asset = asset
-        # 有原文候选时默认展示证据，保持一键确认前可见；未知输入默认折叠。
+        # 有候选线索时直接预选；冲突或未知字段仍留空，由用户只处理真正缺失项。
         self.evidence_toggle.setChecked(any(
             item.fact_key in {"measurement_type", "value_scale"} and item.excerpt
             for item in asset.evidence
         ))
-        self.measurement_combo.setCurrentIndex(0)
-        self.scale_combo.setCurrentIndex(0)
+        measurement_index = self.measurement_combo.findData(asset.measurement_hint.value)
+        scale_index = self.scale_combo.findData(asset.scale_hint.value)
+        self.measurement_combo.setCurrentIndex(max(0, measurement_index))
+        self.scale_combo.setCurrentIndex(max(0, scale_index))
         self._render_auto_judgement(asset)
 
     @Slot(bool)
@@ -1956,7 +1981,7 @@ class ImportPage(QWidget):
             if candidate != unknown
         ]
         display_evidence: list[Evidence] = []
-        display_keys: set[tuple[str, str, str, bool]] = set()
+        display_keys: set[tuple[str, str, str, str, bool]] = set()
 
         def safe_evidence_source(source: str, default: str) -> str:
             if not source:
@@ -1966,7 +1991,8 @@ class ImportPage(QWidget):
             return Path(source).name
 
         def add_display_evidence(item: Evidence) -> None:
-            key = (item.fact_key, item.fact_value, item.reported_transform, item.excerpt_redacted)
+            # 同一个文件名常同时给出单位与尺度线索；展示一次即可。
+            key = (item.source, item.location, item.excerpt, item.evidence_level, item.excerpt_redacted)
             if key not in display_keys and len(display_evidence) < 8:
                 display_keys.add(key)
                 display_evidence.append(item)
@@ -1998,7 +2024,10 @@ class ImportPage(QWidget):
                 else safe_evidence_source(item.source, "当前文件")
             )
             location = f" · {item.location}" if item.location and not item.excerpt_redacted else ""
-            excerpt_kind = "脱敏摘录" if item.excerpt_redacted else "原文摘录"
+            excerpt_kind = (
+                "文件名线索" if item.evidence_level == "filename_candidate"
+                else "脱敏摘录" if item.excerpt_redacted else "原文摘录"
+            )
             evidence_lines.append(f"• {excerpt_kind}候选：{source}{location}：“{item.excerpt}”")
         unlinked_notes = [
             item for item in asset.evidence
@@ -2041,20 +2070,14 @@ class ImportPage(QWidget):
             item.fact_value for item in fact_evidence if item.fact_key == "value_scale"
         }) > 1
         if has_conflicting_measurement or has_conflicting_scale:
-            verdict = "初步判读：文件里有互相冲突或涉及不同数据的文字线索，软件不会替你选；请核对当前表格对应的说明。"
+            verdict = "识别到互相冲突的线索；冲突项未自动选择，请核对后修改。"
             if candidates:
-                verdict += "其他没有冲突的候选：" + "；".join(candidates) + "。"
+                verdict += "其余建议：" + "；".join(candidates) + "。"
         elif candidates:
-            verdict = "初步判读：文件文字给出以下候选，尚未替你确认：" + "；".join(candidates) + "。"
+            verdict = "软件已按可见线索预选：" + "；".join(candidates) + "。不符合时可直接修改。"
         else:
-            verdict = (
-                "初步判读：这是可读取的表达表候选，但文件文字没有说明数值单位或转换；"
-                "仅凭数值外观无法可靠区分原始 count、TPM/FPKM/CPM、芯片信号或是否取过 log。"
-            )
-        evidence_heading = (
-            "\n识别依据（下面是原文摘录；仅作候选，仍需你确认）：\n"
-            if fact_evidence else "\n识别依据（显示软件线索及核查范围，不代表原文摘录）：\n"
-        )
+            verdict = "暂未找到可靠单位或变换线索；请只补选仍显示“未确认”的项目。"
+        evidence_heading = "\n识别依据：\n"
         evidence_text = evidence_heading + (
             "\n".join(evidence_lines)
             if evidence_lines else "• 没有找到单位或转换的文字线索。"
@@ -2093,16 +2116,15 @@ class ImportPage(QWidget):
             )
         else:
             question = "你已选择数值单位和尺度；请确保选择与数据提供方说明一致。"
-        if (
-            selected_measurement != MeasurementType.UNKNOWN.value
-            and selected_scale != ValueScale.UNKNOWN.value
-        ):
-            confirmation_status = f"\n当前状态：{question}"
-        else:
-            confirmation_status = f"\n现在先确认一项：{question}"
+        confirmation_status = (
+            f"\n{question}" if (
+                selected_measurement == MeasurementType.UNKNOWN.value
+                or selected_scale == ValueScale.UNKNOWN.value
+            ) else "\n已预选，可按需要修改。"
+        )
         text = (
             verdict + evidence_text + confirmation_status
-            + "\n只有尚未确认的事实会阻止开始分析；你仍可查看预览。不要靠数字大小猜单位或变换。"
+            + "\n请继续查看表格预览。"
         )
         self.auto_judgement.setText(text)
         summary = verdict if candidates or has_conflicting_measurement or has_conflicting_scale else (
@@ -2110,7 +2132,12 @@ class ImportPage(QWidget):
         )
         self.organize_auto_judgement.setText(summary + confirmation_status)
         self.measurement_suggestion.setText(evidence_text.strip())
-        self.use_evidence_button.setVisible(bool(fact_evidence))
+        adoptable_levels = {"table_text_candidate", "linked_sidecar_text_candidate"}
+        adoptable_evidence = [
+            item for item in display_evidence
+            if item.evidence_level in adoptable_levels and item.excerpt and not item.excerpt_redacted
+        ]
+        self.use_evidence_button.setVisible(bool(adoptable_evidence))
         scan_incomplete = any(
             item.evidence_level in {"sidecar_scan_skipped", "sidecar_scan_incomplete"}
             for item in asset.evidence
@@ -2119,8 +2146,7 @@ class ImportPage(QWidget):
             any(
                 item.fact_key == fact_key
                 and item.fact_value == candidate
-                and item.excerpt
-                and not item.excerpt_redacted
+                and item in adoptable_evidence
                 for item in display_evidence
             )
             for fact_key, candidate in supported_candidates
@@ -2131,12 +2157,12 @@ class ImportPage(QWidget):
                 "说明文件未能完整核查；为避免漏掉相互冲突的说法，不能一键采用候选。"
                 "请检查交付说明后，在上方逐项手动确认。"
             )
-        elif fact_evidence and supported_candidates and not can_confirm_all:
+        elif adoptable_evidence and supported_candidates and not can_confirm_all:
             self.use_evidence_button.setToolTip(
                 "识别到了文字候选，但可引用内容包含可能的个人/样本信息，软件已隐藏原句；"
                 "请查看交付说明后，在上方逐项手动确认。"
             )
-        elif fact_evidence and not supported_candidates:
+        elif adoptable_evidence and not supported_candidates:
             self.use_evidence_button.setToolTip(
                 "文件中的单位或尺度文字候选互相冲突；软件不会替你挑选。"
                 "请对照交付说明，在上方逐项手动确认。"
@@ -2192,19 +2218,17 @@ class ImportPage(QWidget):
     def _question_can_continue(self) -> bool:
         if self.session is None:
             return False
-        question = self.organize_tabs.currentIndex()
-        if question == 0:
-            row_count = len(self.session.raw_table.rows)
-            header = self.header_spin.value() - 1
-            first_data = self.data_start_spin.value() - 1
-            return 0 <= header < row_count and header < first_data < row_count
-        if question == 1:
-            return (
-                self.measurement_combo.currentData() != MeasurementType.UNKNOWN.value
-                and self.scale_combo.currentData() != ValueScale.UNKNOWN.value
-            )
+        row_count = len(self.session.raw_table.rows)
+        header = self.header_spin.value() - 1
+        first_data = self.data_start_spin.value() - 1
+        structure_ok = 0 <= header < row_count and header < first_data < row_count
+        facts_ok = (
+            self.measurement_combo.currentData() != MeasurementType.UNKNOWN.value
+            and self.scale_combo.currentData() != ValueScale.UNKNOWN.value
+        )
         feature_column, sample_columns, _, _ = self._role_columns()
-        return feature_column is not None and len(sample_columns) >= 2
+        roles_ok = feature_column is not None and len(sample_columns) >= 2
+        return structure_ok and facts_ok and roles_ok
 
     def _update_question_state(self) -> None:
         if self.session is None:
@@ -2212,15 +2236,10 @@ class ImportPage(QWidget):
             self.back_button.setEnabled(False)
             self.prepare_button.setEnabled(False)
             return
-        index = self.organize_tabs.currentIndex()
-        self.question_label.setText(f"第 {index + 1} / {self.organize_tabs.count()} 步：{self._question_titles[index]}")
+        self.question_label.setText("检查数据后继续")
         self.back_button.setEnabled(self._active_thread is None)
-        self.back_button.setText("上一步" if index > 0 else "返回文件清单")
-        self.prepare_button.setText(
-            "确认预览，继续核对数值" if index == 0 else
-            "确认数值，检查列用途" if index == 1 else
-            "确认列用途，开始整理"
-        )
+        self.back_button.setText("返回文件清单")
+        self.prepare_button.setText("整理并进入分组")
         self.prepare_button.setEnabled(
             self._active_thread is None and self._question_can_continue()
         )
@@ -2229,13 +2248,9 @@ class ImportPage(QWidget):
         self._update_question_state()
         if self.session is None or self._question_can_continue():
             return
-        index = self.organize_tabs.currentIndex()
-        messages = (
-            "请确认表头行和第一行数据位置；数据行要在表头之后。",
-            "请根据交付说明选择数值单位和转换方式。",
-            "请指定一列特征编号和至少两列样本表达；不需要的列可设为忽略。",
+        self.organize_status_label.setText(
+            "请核对表头与数据方向、数值类型与是否取对数，并指定特征编号列和至少两列样本表达。"
         )
-        self.organize_status_label.setText(messages[index])
 
     def _populate_column_controls(self) -> None:
         assert self.session is not None

@@ -362,7 +362,7 @@ def test_failed_plotting_does_not_replace_existing_analysis_outputs(
             return RJobResponse("test", True, result)
 
     relative_outputs = (
-        "analysis-plan.json", "analysis/analysis-plan.json", "analysis/deg-result.json",
+        "analysis/analysis-plan.json", "analysis/deg-result.json",
         "figures/figure-manifest.json", "figures/pca.png", "figures/sample-correlation.png",
         "figures/p-value-histogram.png", "figures/volcano.png", "figures/top-heatmap.png",
         "reports/analysis-report.html", "reports/deg-results.xlsx",
@@ -392,7 +392,7 @@ def test_output_publish_rolls_back_if_a_file_cannot_be_replaced(
     import os
 
     relative_outputs = (
-        "analysis-plan.json", "analysis/analysis-plan.json", "analysis/deg-result.json",
+        "analysis/analysis-plan.json", "analysis/deg-result.json",
         "figures/figure-manifest.json", "figures/pca.png", "figures/sample-correlation.png",
         "figures/p-value-histogram.png", "figures/volcano.png", "figures/top-heatmap.png",
         "reports/analysis-report.html", "reports/deg-results.xlsx",
@@ -488,7 +488,7 @@ def test_output_publish_refuses_symlinked_output_directory(
     import os
 
     relative_outputs = (
-        "analysis-plan.json", "analysis/analysis-plan.json", "analysis/deg-result.json",
+        "analysis/analysis-plan.json", "analysis/deg-result.json",
         "figures/figure-manifest.json", "figures/pca.png", "figures/sample-correlation.png",
         "figures/p-value-histogram.png", "figures/volcano.png", "figures/top-heatmap.png",
         "reports/analysis-report.html", "reports/deg-results.xlsx",

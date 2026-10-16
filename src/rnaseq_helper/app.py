@@ -40,8 +40,8 @@ def _ui_resource_path(name: str) -> Path | None:
 
 def _gui() -> int:
     try:
-        from PySide6.QtCore import QObject, QThread, Qt, Slot
-        from PySide6.QtGui import QAction, QColor, QPalette
+        from PySide6.QtCore import QObject, QThread, QTimer, Qt, Slot
+        from PySide6.QtGui import QAction, QIcon
         from PySide6.QtWidgets import (
             QApplication, QDialog, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
             QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
@@ -54,78 +54,32 @@ def _gui() -> int:
         return 2
 
     app = QApplication(sys.argv)
-    # 使用 Qt 自带的 Fusion 绘制器，避免 macOS 高对比主题改变步骤导航和表格背景。
-    app.setStyle("Fusion")
-    # macOS 黑白/高对比模式可能把未明确指定的 QTabBar 背景解析成黑色。
-    # 这里把关键调色板角色固定为中性灰阶，避免样式表之外仍被系统主题反转。
-    palette = app.palette()
-    palette_colors = {
-        QPalette.ColorRole.Window: "#f7f7f7",
-        QPalette.ColorRole.WindowText: "#111111",
-        QPalette.ColorRole.Base: "#ffffff",
-        QPalette.ColorRole.AlternateBase: "#f0f0f0",
-        QPalette.ColorRole.Text: "#111111",
-        QPalette.ColorRole.Button: "#ffffff",
-        QPalette.ColorRole.ButtonText: "#111111",
-        QPalette.ColorRole.BrightText: "#000000",
-        QPalette.ColorRole.Highlight: "#cfcfcf",
-        QPalette.ColorRole.HighlightedText: "#000000",
-        QPalette.ColorRole.Light: "#ffffff",
-        QPalette.ColorRole.Midlight: "#dddddd",
-        QPalette.ColorRole.Mid: "#888888",
-        QPalette.ColorRole.Dark: "#444444",
-        QPalette.ColorRole.Shadow: "#111111",
-    }
-    for role, color in palette_colors.items():
-        palette.setColor(role, QColor(color))
-    app.setPalette(palette)
-    # 不依赖系统彩色/高对比主题：黑白或灰度模式下仍用边框、底色和字重
-    # 区分层级，不能只靠蓝色、浅灰色或透明背景表达状态。
-    style_sheet = """
-        QWidget { font-size: 13px; color: #111111; background: #f7f7f7; }
-        QMainWindow { background: #f7f7f7; }
-        QPushButton[workflowStep="active"] { background: #111111; color: #ffffff; font-weight: 700; border: 2px solid #111111; }
-        QPushButton[workflowStep="ready"] { background: #ffffff; color: #111111; border: 1px solid #333333; }
-        QPushButton[workflowStep="locked"] { background: #e9e9e9; color: #666666; border: 1px solid #888888; }
-        QGroupBox { margin-top: 14px; padding: 14px 12px 12px; border: 1px solid #555555; border-radius: 6px; background: #ffffff; }
-        QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px; color: #000000; font-weight: 700; background: #ffffff; }
-        QLabel { background: transparent; color: #111111; }
-        QLineEdit, QComboBox, QSpinBox { height: 34px; min-height: 34px; max-height: 34px; padding: 0 8px; border: 1px solid #444444; border-radius: 4px; background: #ffffff; color: #111111; }
-        QPushButton { min-height: 40px; padding: 5px 14px; border: 1px solid #444444; border-radius: 4px; background: #ffffff; color: #111111; }
-        QPushButton[workflowStep="active"], QPushButton[workflowStep="ready"], QPushButton[workflowStep="locked"] { min-height: 48px; }
-        QComboBox { padding-right: 30px; }
-        QComboBox::drop-down { subcontrol-origin: padding; subcontrol-position: top right; width: 28px; border-left: 1px solid #888888; background: #eeeeee; }
-        QTableWidget QComboBox { height: 30px; min-height: 30px; max-height: 30px; padding: 0 24px 0 6px; border-radius: 3px; }
-        QTableWidget QComboBox::drop-down { width: 22px; }
-        QLineEdit:focus, QComboBox:focus, QSpinBox:focus { border: 2px solid #000000; }
-        QPushButton:hover { background: #eeeeee; border: 2px solid #000000; }
-        QPushButton:focus { outline: 2px solid #000000; outline-offset: 2px; }
-        QPushButton:pressed { background: #d9d9d9; }
-        QPushButton:disabled { color: #666666; background: #e9e9e9; border-color: #888888; }
-        QCheckBox { background: transparent; color: #111111; spacing: 8px; min-height: 34px; }
-        QCheckBox::indicator { width: 22px; height: 22px; border-radius: 3px; }
-        QCheckBox::indicator:unchecked { border: 2px solid #333333; background: #ffffff; }
-        QCheckBox::indicator:checked { border: 2px solid #000000; background: #111111; }
-        QCheckBox:focus, QToolButton:focus { outline: 2px solid #000000; outline-offset: 2px; }
-        QTableWidget { gridline-color: #777777; alternate-background-color: #f0f0f0; selection-background-color: #cfcfcf; selection-color: #000000; border: 1px solid #444444; border-radius: 4px; }
-        QTableWidget::item { padding: 4px; }
-        QHeaderView::section { padding: 8px 6px; background: #e5e5e5; color: #111111; font-weight: 700; border: 0; border-bottom: 1px solid #555555; }
-        QScrollArea { border: 0; background: #ffffff; }
-        QScrollBar:vertical { width: 16px; background: #eeeeee; border: 1px solid #555555; }
-        QScrollBar::handle:vertical { min-height: 32px; background: #777777; border: 1px solid #111111; }
-        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 16px; background: #dddddd; border: 1px solid #555555; }
-        QPlainTextEdit { background: #ffffff; color: #111111; }
-        QToolTip { padding: 5px; color: #111111; background: #ffffff; border: 1px solid #444444; }
-    """
-    arrow_path = _ui_resource_path("combobox-arrow.svg")
-    if arrow_path is not None:
-        style_sheet += (
-            f'\nQComboBox::down-arrow {{ image: url("{arrow_path.as_posix()}"); '
-            "width: 12px; height: 12px; }\n"
-        )
-    app.setStyleSheet(style_sheet)
+    app.setStyleSheet(
+        "QWidget { font-size: 13px; }"
+        "QPushButton[workflowStep=active] { color: #007AFF; font-weight: 700; }"
+        "QPushButton[workflowStep=ready] { color: palette(text); }"
+        "QPushButton[workflowStep=locked] { color: palette(mid); }"
+        "QGroupBox { margin-top: 12px; padding: 10px; border: 1px solid palette(mid); border-radius: 5px; }"
+        "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }"
+        "QLineEdit, QComboBox, QSpinBox { min-height: 30px; padding: 2px 7px; }"
+        "QTableWidget::item { padding: 4px; }"
+        "QLabel#pageTitle { font-size: 20px; font-weight: 650; }"
+        "QLabel#sectionTitle { font-size: 16px; font-weight: 650; }"
+        "QLabel#groupingOverview, QLabel#groupSummary { font-weight: 650; }"
+        "QLabel#groupSummary { font-size: 15px; padding: 4px 2px; }"
+        "QLabel#pageSubtitle, QLabel#groupingNote { color: palette(mid); }"
+        "QLabel#recognitionSummary { color: #245f9e; padding: 4px 0; }"
+        "QWidget#importDropZone { background: palette(base); border: 1px dashed palette(mid); border-radius: 8px; }"
+        "QWidget#workflowActionBar { border-top: 1px solid palette(mid); }"
+        "QPushButton#primaryAction { background: #007AFF; color: white; border: 0; border-radius: 6px; font-weight: 650; padding: 6px 18px; }"
+        "QPushButton#primaryAction:disabled { background: palette(mid); color: palette(window); }"
+        "QToolTip { padding: 5px; }"
+    )
     window = QMainWindow()
-    window.setWindowTitle("RNA-Seq Helper · 阶段 5")
+    window.setWindowTitle("RNA-Seq Helper")
+    icon_path = _ui_resource_path("AppIcon.icns")
+    if icon_path is not None:
+        window.setWindowIcon(QIcon(str(icon_path)))
     tools_menu = window.menuBar().addMenu("工具")
     label = QLabel("欢迎使用 RNA-Seq Helper\n可先检查运行环境，再运行微型验证。")
     label.setWordWrap(True)
@@ -169,14 +123,14 @@ def _gui() -> int:
     results_page = ResultsPage()
     workflow = QWidget()
     workflow_layout = QVBoxLayout(workflow)
-    workflow_layout.setContentsMargins(14, 12, 14, 14)
-    workflow_layout.setSpacing(12)
+    workflow_layout.setContentsMargins(18, 10, 18, 0)
+    workflow_layout.setSpacing(8)
     navigation = QHBoxLayout()
     navigation.setSpacing(10)
-    step_labels = ("1  添加数据", "2  确认表格", "3  确认样本", "4  查看结果")
+    step_labels = ("1  导入数据", "2  检查数据", "3  设置分组", "4  分析结果")
     step_buttons = [QPushButton(label) for label in step_labels]
     for button_step in step_buttons:
-        button_step.setMinimumHeight(48)
+        button_step.setMinimumHeight(34)
         navigation.addWidget(button_step, 1)
     workflow_layout.addLayout(navigation)
     pages = QStackedWidget()
@@ -184,6 +138,23 @@ def _gui() -> int:
     pages.addWidget(analysis_page)
     pages.addWidget(results_page)
     workflow_layout.addWidget(pages, 1)
+
+    action_bar = QWidget()
+    action_bar.setObjectName("workflowActionBar")
+    action_layout = QHBoxLayout(action_bar)
+    action_layout.setContentsMargins(0, 8, 0, 12)
+    action_layout.setSpacing(10)
+    action_status = QLabel("选择表达数据文件开始。")
+    action_status.setObjectName("actionStatus")
+    action_status.setWordWrap(True)
+    action_status.setMaximumHeight(42)
+    action_layout.addWidget(action_status, 1)
+    action_back = QPushButton("返回")
+    action_primary = QPushButton("继续")
+    action_primary.setObjectName("primaryAction")
+    action_layout.addWidget(action_back)
+    action_layout.addWidget(action_primary)
+    workflow_layout.addWidget(action_bar)
 
     ready_steps = [True, False, False, False]
     current_step = 0
@@ -196,6 +167,45 @@ def _gui() -> int:
             step_button.setProperty("workflowStep", state)
             step_button.style().unpolish(step_button)
             step_button.style().polish(step_button)
+
+    def refresh_action_bar() -> None:
+        for inner_button in (
+            import_page.back_button,
+            import_page.cancel_button,
+            import_page.organize_cancel_button,
+            analysis_page.cancel_button,
+        ):
+            inner_button.hide()
+        if current_step == 0:
+            importing = import_page._active_thread is not None and import_page._active_thread.isRunning()
+            action_back.setText("取消任务" if importing else "返回")
+            action_back.setEnabled(importing)
+            action_primary.setText(import_page.continue_button.text())
+            action_primary.setEnabled(not importing and import_page.continue_button.isEnabled())
+            action_status.setText(import_page.status_label.text() or "选择表达数据文件开始。")
+        elif current_step == 1:
+            importing = import_page._active_thread is not None and import_page._active_thread.isRunning()
+            action_back.setText("取消任务" if importing else "返回文件清单")
+            action_back.setEnabled(importing or import_page._active_thread is None)
+            action_primary.setText("整理并进入分组")
+            action_primary.setEnabled(not importing and import_page.prepare_button.isEnabled())
+            action_status.setText(import_page.organize_status_label.text() or "核对结构、数值类型和列用途。")
+        elif current_step == 2:
+            analyzing = any(thread.isRunning() for thread, _worker, _context in analysis_page._jobs)
+            action_back.setText("取消任务" if analyzing else "返回检查数据")
+            action_back.setEnabled(True)
+            action_primary.setText("开始分析" if analysis_page.plan and analysis_page.plan.runnable else "生成分析计划")
+            action_primary.setEnabled(not analyzing and (
+                analysis_page.run_button.isEnabled()
+                if analysis_page.plan and analysis_page.plan.runnable
+                else analysis_page.plan_button.isEnabled()
+            ))
+            action_status.setText(analysis_page.status_label.text() or "确认实验组和对照组后生成分析计划。")
+        else:
+            action_back.setEnabled(True)
+            action_primary.setText("打开离线报告")
+            action_primary.setEnabled(results_page.open_report_button.isEnabled())
+            action_status.setText("分析完成后可查看报告、结果表和项目文件。")
 
     def show_workflow_step(index: int) -> None:
         nonlocal current_step
@@ -210,13 +220,52 @@ def _gui() -> int:
         else:
             pages.setCurrentWidget(results_page)
         refresh_stepper()
+        refresh_action_bar()
 
     for index, step_button in enumerate(step_buttons):
         step_button.clicked.connect(lambda _checked=False, current=index: show_workflow_step(current))
+
+    def action_back_clicked() -> None:
+        if current_step < 2 and import_page._active_thread is not None and import_page._active_thread.isRunning():
+            import_page.cancel_import()
+        elif current_step == 2 and any(thread.isRunning() for thread, _worker, _context in analysis_page._jobs):
+            analysis_page.cancel_analysis()
+        elif current_step == 1:
+            show_workflow_step(0)
+        elif current_step == 2:
+            show_workflow_step(1)
+        elif current_step == 3:
+            show_workflow_step(2)
+
+    def action_primary_clicked() -> None:
+        if current_step == 0:
+            import_page.continue_button.click()
+        elif current_step == 1:
+            import_page.prepare_button.click()
+        elif current_step == 2:
+            if analysis_page.plan and analysis_page.plan.runnable:
+                analysis_page.run_button.click()
+            else:
+                analysis_page.plan_button.click()
+        elif current_step == 3:
+            results_page.open_report_button.click()
+        refresh_action_bar()
+
+    action_back.clicked.connect(action_back_clicked)
+    action_primary.clicked.connect(action_primary_clicked)
+    import_page.continue_button.hide()
+    import_page.prepare_button.hide()
+    analysis_page.plan_button.hide()
+    analysis_page.run_button.hide()
+    analysis_page.cancel_button.hide()
     import_page.stepAvailabilityChanged.connect(
         lambda index, available: _update_import_step(index, available)
     )
     import_page.workflowStepRequested.connect(show_workflow_step)
+    footer_timer = QTimer(window)
+    footer_timer.setInterval(400)
+    footer_timer.timeout.connect(refresh_action_bar)
+    footer_timer.start()
 
     def _update_import_step(index: int, available: bool) -> None:
         if 0 <= index < 2:
@@ -231,8 +280,12 @@ def _gui() -> int:
 
     import_page.matrixReady.connect(analysis_page.set_matrix)
     import_page.matrixReady.connect(results_page.set_matrix)
-    analysis_page.analysisReady.connect(results_page.set_result)
-    def analysis_finished(_result: object) -> None:
+    def analysis_finished(result: object) -> None:
+        # 生成计划时项目目录会从导入暂存位置移动到用户选定的位置；
+        # 必须先把最新矩阵路径交给结果页，再计算报告/项目按钮状态。
+        if analysis_page.matrix is not None:
+            results_page.set_matrix(analysis_page.matrix)
+        results_page.set_result(result, analysis_page.plan)
         ready_steps[3] = True
         show_workflow_step(3)
 
@@ -242,6 +295,7 @@ def _gui() -> int:
 
     import_page.matrixReady.connect(matrix_prepared)
     analysis_page.analysisReady.connect(analysis_finished)
+    results_page.regroupRequested.connect(lambda: show_workflow_step(2))
 
     def open_saved_project(project_dir: str) -> None:
         if import_page._active_thread is not None and import_page._active_thread.isRunning():
@@ -317,6 +371,7 @@ def _gui() -> int:
         threads = [current_thread for current_thread, _worker in active_jobs]
         threads.extend(current_thread for current_thread, _worker in project_jobs)
         threads.extend(current_thread for current_thread, _worker, _context in analysis_page._jobs)
+        threads.extend(results_page.active_threads())
         if import_page._active_thread is not None:
             threads.append(import_page._active_thread)
         unique: list[QThread] = []
@@ -326,6 +381,7 @@ def _gui() -> int:
         return tuple(unique)
 
     def cancel_active_jobs() -> None:
+        results_page.cancel_refresh()
         for _current_thread, worker in tuple(active_jobs):
             context = getattr(worker, "context", None)
             cancel_event = getattr(context, "cancel_event", None)
@@ -432,8 +488,8 @@ def _gui() -> int:
     button.clicked.connect(lambda: start("micro_limma"))
     deseq2_button.clicked.connect(lambda: start("micro_deseq2"))
     cancel_button.clicked.connect(cancel_current)
-    window.setMinimumSize(820, 560)
-    window.resize(1024, 768)
+    window.setMinimumSize(900, 600)
+    window.resize(1120, 760)
     window.show()
     return app.exec()
 

@@ -73,6 +73,23 @@ class AssetScanner:
             re.IGNORECASE,
         ), "没有取 log / 线性尺度"),
     )
+    # 常见交付矩阵会把单位写在文件名而不是表格单元格中。使用完整词元，
+    # 避免把“tpm”误识别成其他名称的一部分；同时保留多线索冲突供界面处理。
+    FILENAME_MEASUREMENT_PATTERNS = (
+        (MeasurementType.RAW_COUNT, re.compile(
+            r"(?<![a-z0-9])(?:raw[_. -]*)?(?:(?:gene|read)[_. -]*)?counts?(?![a-z0-9])",
+            re.IGNORECASE,
+        ), "count 矩阵"),
+        (MeasurementType.TPM, re.compile(r"(?<![a-z0-9])tpm(?![a-z0-9])", re.IGNORECASE), "TPM 矩阵"),
+        (MeasurementType.FPKM, re.compile(r"(?<![a-z0-9])fpkm(?![a-z0-9])", re.IGNORECASE), "FPKM 矩阵"),
+        (MeasurementType.RPKM, re.compile(r"(?<![a-z0-9])rpkm(?![a-z0-9])", re.IGNORECASE), "RPKM 矩阵"),
+        (MeasurementType.CPM, re.compile(r"(?<![a-z0-9])cpm(?![a-z0-9])", re.IGNORECASE), "CPM 矩阵"),
+        (MeasurementType.OTHER_NORMALIZED, re.compile(
+            r"(?<![a-z0-9])(?:microarray|probe|signal|intensity)(?![a-z0-9])|"
+            r"normalized[_. -]+expression|normalised[_. -]+expression",
+            re.IGNORECASE,
+        ), "芯片/标准化表达矩阵"),
+    )
 
     def __init__(self, reader: TableReader | None = None) -> None:
         self.reader = reader or TableReader()
@@ -318,6 +335,13 @@ class AssetScanner:
                     Evidence(f"预览数值密度 {density:.2f}", "前 40 行", min(0.95, 0.45 + density / 2)),
                 ]
                 evidence.extend(text_evidence)
+                if measurement_hint == MeasurementType.RAW_COUNT:
+                    fractional = _fractional_expression_values(preview.rows)
+                    if fractional:
+                        evidence.append(Evidence(
+                            "count 线索已识别，但预览含小数；当前软件不能把这类值直接送入 DESeq2，也不会自动取整。",
+                            str(path), 0.99, evidence_level="count_compatibility_warning",
+                        ))
                 if measurement_hint != MeasurementType.UNKNOWN:
                     measurement_name = {
                         MeasurementType.RAW_COUNT: "原始 count",
@@ -473,12 +497,66 @@ class AssetScanner:
     ) -> tuple[MeasurementType, ValueScale, tuple[Evidence, ...]]:
         """提取带来源和位置的文字候选；冲突时返回 UNKNOWN，绝不猜测。"""
         evidence = cls._table_fact_evidence(path, rows, selected_sheet)
+        evidence.extend(cls._filename_fact_evidence(path))
         evidence.extend(cls._sidecar_fact_evidence(path, selected_sheet, sheet_count))
+        # count/TPM/FPKM/RPKM/CPM 文件名指向常见线性矩阵时，可直接预选线性尺度；
+        # 明确的 log/ln/z-score 文件名仍优先按变换线索识别，且文字冲突不会被覆盖。
+        measurement_hint = cls._consensus_hint(evidence, "measurement_type", MeasurementType)
+        scale_hint = cls._consensus_hint(evidence, "value_scale", ValueScale)
+        if (
+            scale_hint == ValueScale.UNKNOWN
+            and measurement_hint in {
+                MeasurementType.RAW_COUNT, MeasurementType.TPM, MeasurementType.FPKM,
+                MeasurementType.RPKM, MeasurementType.CPM,
+            }
+            and any(item.evidence_level == "filename_candidate" for item in evidence)
+        ):
+            evidence.append(Evidence(
+                "单位文件名对应常见线性表达矩阵，未发现 log/其他变换标记。",
+                str(path), 0.84, "value_scale", ValueScale.LINEAR.value,
+                "文件名", path.stem, "filename_candidate",
+            ))
         return (
             cls._consensus_hint(evidence, "measurement_type", MeasurementType),
             cls._consensus_hint(evidence, "value_scale", ValueScale),
             tuple(evidence),
         )
+
+    @classmethod
+    def _filename_fact_evidence(cls, path: Path) -> list[Evidence]:
+        stem = path.stem.replace("-", " ").replace("_", " ").replace(".", " ")
+        evidence: list[Evidence] = []
+        normalized_count = bool(re.search(r"(?<![a-z0-9])(?:normalized|normalised|norm)(?:[_. -]+)counts?(?![a-z0-9])", stem, re.IGNORECASE))
+        if not normalized_count:
+            for value, pattern, label in cls.FILENAME_MEASUREMENT_PATTERNS:
+                if value == MeasurementType.OTHER_NORMALIZED:
+                    continue
+                if pattern.search(stem):
+                    evidence.append(Evidence(
+                        f"文件名包含“{label}”线索，已作为可修改的自动建议。",
+                        str(path), 0.84, "measurement_type", value.value,
+                        "文件名", path.stem, "filename_candidate",
+                    ))
+        if not any(item.fact_key == "measurement_type" for item in evidence):
+            for value, pattern, label in cls.FILENAME_MEASUREMENT_PATTERNS:
+                if value == MeasurementType.OTHER_NORMALIZED and pattern.search(stem):
+                    evidence.append(Evidence(
+                        f"文件名包含“{label}”线索，已作为可修改的自动建议。",
+                        str(path), 0.78, "measurement_type", value.value,
+                        "文件名", path.stem, "filename_candidate",
+                    ))
+                    break
+        scale_matches = []
+        for value, pattern, label in cls.SCALE_PATTERNS:
+            if pattern.search(stem):
+                scale_matches.append((value, label))
+        for value, label in scale_matches:
+            evidence.append(Evidence(
+                f"文件名包含“{label}”线索，已作为可修改的自动建议。",
+                str(path), 0.84, "value_scale", value.value,
+                "文件名", path.stem, "filename_candidate",
+            ))
+        return evidence
 
     @classmethod
     def _table_fact_evidence(
@@ -719,6 +797,19 @@ def _excel_column(number: int) -> str:
         number, remainder = divmod(number - 1, 26)
         result = chr(ord("A") + remainder) + result
     return result
+
+
+def _fractional_expression_values(rows: tuple[tuple[str, ...], ...]) -> bool:
+    """Check a preview for fractional expression values; never use this to infer units."""
+    for row in rows[1:]:
+        for cell in row[1:]:
+            try:
+                value = float(cell.replace(",", "").strip())
+            except (AttributeError, ValueError):
+                continue
+            if value.is_integer() is False:
+                return True
+    return False
 
 
 def _decode_sidecar(raw: bytes) -> str | None:

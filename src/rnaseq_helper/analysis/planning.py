@@ -20,6 +20,7 @@ from rnaseq_helper.domain.models import (
     MeasurementType,
     ObservationUnit,
     ReferenceRequest,
+    ResultFilterConfig,
     ValueScale,
     sha256_file,
 )
@@ -48,6 +49,7 @@ class PlanningService:
         paired_subjects: Mapping[str, str] | None = None,
         batch: Mapping[str, str] | None = None,
         replicate_structure: str | None = None,
+        result_filter: ResultFilterConfig | None = None,
     ) -> AnalysisPlan:
         sample_ids = self._read_sample_ids(matrix)
         # 只有两组比较实际使用的样本才进入设计；缺失、空值、未确认和
@@ -255,6 +257,7 @@ class PlanningService:
             contrast=contrast,
             preprocessing=preprocessing,
             config=selected_config,
+            result_filter=result_filter or ResultFilterConfig(),
             limitations_zh=tuple(limitations),
             input_selection_reason_zh=reason,
             warnings=tuple(
@@ -284,8 +287,63 @@ class PlanningService:
         return plan
 
     @staticmethod
+    def restore(value: Mapping[str, object]) -> AnalysisPlan:
+        """Restore a validated saved plan for report/figure refresh, not model fitting."""
+        raw_config = value.get("config")
+        if not isinstance(raw_config, Mapping):
+            raise ValueError("已保存的分析计划缺少可恢复的模型配置")
+        raw_filter = raw_config.get("expression_filter")
+        expression_filter = None
+        if isinstance(raw_filter, Mapping):
+            expression_filter = ExpressionFilterSpec(
+                scale=str(raw_filter.get("scale", "")),
+                threshold=(float(raw_filter["threshold"]) if raw_filter.get("threshold") is not None else None),
+                unit=(str(raw_filter["unit"]) if raw_filter.get("unit") is not None else None),
+                min_samples=(int(raw_filter["min_samples"]) if raw_filter.get("min_samples") is not None else None),
+                reason_zh=str(raw_filter.get("reason_zh", "")),
+            )
+        config = DEGConfig(
+            control_group=str(raw_config.get("control_group", "control")),
+            test_group=str(raw_config.get("test_group", "test")),
+            fdr_threshold=float(raw_config.get("fdr_threshold", 0.05)),
+            lfc_threshold=float(raw_config.get("lfc_threshold", 1.0)),
+            expression_filter=expression_filter,
+            paired_subject_column=(str(raw_config["paired_subject_column"]) if raw_config.get("paired_subject_column") else None),
+            batch_column=(str(raw_config["batch_column"]) if raw_config.get("batch_column") else None),
+            lfc_shrinkage=str(raw_config.get("lfc_shrinkage", "not_requested")),
+            top_heatmap_features=int(raw_config.get("top_heatmap_features", 30)),
+            random_seed=int(raw_config.get("random_seed", 20260913)),
+        )
+        mapping_fields = ("resolved_method_parameters", "design", "contrast", "preprocessing")
+        mappings = {
+            key: dict(value[key]) if isinstance(value.get(key), Mapping) else {}
+            for key in mapping_fields
+        }
+        return AnalysisPlan(
+            plan_id=str(value.get("plan_id", "restored")),
+            matrix_hash=str(value.get("matrix_hash", "")),
+            method=str(value.get("method", "")),
+            method_reason_zh=str(value.get("method_reason_zh", "")),
+            analysis_basis=str(value.get("analysis_basis", "")),
+            method_profile_id=str(value.get("method_profile_id", "")),
+            resolved_method_parameters=mappings["resolved_method_parameters"],
+            design=mappings["design"],
+            contrast=mappings["contrast"],
+            preprocessing=mappings["preprocessing"],
+            config=config,
+            result_filter=ResultFilterConfig.from_mapping(value.get("result_filter")),
+            limitations_zh=tuple(str(item) for item in value.get("limitations_zh", ()) if item is not None),
+            input_selection_reason_zh=str(value.get("input_selection_reason_zh", "")),
+            warnings=tuple(str(item) for item in value.get("warnings", ()) if item is not None),
+            confirmation_digest=str(value.get("confirmation_digest", "")),
+            reference_required_for_fit=bool(value.get("reference_required_for_fit", False)),
+            source_modality=(str(value["source_modality"]) if value.get("source_modality") else None),
+            feature_metadata_hash=(str(value["feature_metadata_hash"]) if value.get("feature_metadata_hash") else None),
+        )
+
+    @staticmethod
     def save(plan: AnalysisPlan, project_dir: Path) -> Path:
-        path = project_dir / "analysis-plan.json"
+        path = project_dir / "analysis" / "analysis-plan.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(plan.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return path

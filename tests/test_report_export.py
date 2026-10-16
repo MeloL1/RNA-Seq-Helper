@@ -110,7 +110,22 @@ def test_html_report_distinguishes_matrix_columns_from_analyzed_samples(tmp_path
         method_reason_zh="reason",
     )
 
-    ReportService._write_html(output, matrix, plan, {"table": []}, {}, "", {})
+    report_rows = [
+        {
+            "feature_key": f"positive-{index:02d}", "gene_symbol": f"POS{index:02d}",
+            "log2FoldChange": index + 1, "pvalue": (index + 1) / 1000,
+            "padj": (index + 1) / 500,
+        }
+        for index in range(12)
+    ] + [
+        {
+            "feature_key": f"negative-{index:02d}", "gene_symbol": f"NEG{index:02d}",
+            "log2FoldChange": -(index + 1), "pvalue": (index + 1) / 1000,
+            "padj": (index + 1) / 500,
+        }
+        for index in range(12)
+    ]
+    ReportService._write_html(output, matrix, plan, {"table": report_rows}, {}, "", {})
 
     report = output.read_text(encoding="utf-8")
     assert "完整矩阵：120 个特征 × 8 个样本列" in report
@@ -122,6 +137,14 @@ def test_html_report_distinguishes_matrix_columns_from_analyzed_samples(tmp_path
     assert "T1: test；配对个体 个体1；批次1" in report
     assert "patient-001" not in report
     assert "batch-private-label" not in report
+    positive_section, negative_section = report.split("log2FoldChange &lt; 0 · 对照组较高", maxsplit=1)
+    positive_section = positive_section.split("log2FoldChange &gt; 0 · 实验组较高", maxsplit=1)[1]
+    negative_section = negative_section.split("</section>", maxsplit=1)[0]
+    assert "每个方向最多列出 10 个" in report
+    assert positive_section.count("<tr><td>positive-") == 10
+    assert negative_section.count("<tr><td>negative-") == 10
+    assert "positive-00" in positive_section and "positive-10" not in positive_section
+    assert "negative-00" in negative_section and "negative-10" not in negative_section
 
 
 def test_report_transform_explains_analysis_step_and_unknown_upstream_formula() -> None:

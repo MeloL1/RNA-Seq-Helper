@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#102B52"/>
+      <stop offset="1" stop-color="#1769A6"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" fill="url(#background)"/>
+  <g transform="translate(218 218)">
+    <rect x="0" y="0" width="132" height="132" rx="28" fill="#D9F3FF"/>
+    <rect x="152" y="0" width="132" height="132" rx="28" fill="#82D8F2"/>
+    <rect x="304" y="0" width="132" height="132" rx="28" fill="#45B9E0"/>
+    <rect x="456" y="0" width="132" height="132" rx="28" fill="#B8ECF7"/>
+
+    <rect x="0" y="152" width="132" height="132" rx="28" fill="#78C9E9"/>
+    <rect x="152" y="152" width="132" height="132" rx="28" fill="#F1C96B"/>
+    <rect x="304" y="152" width="132" height="132" rx="28" fill="#B6E9F5"/>
+    <rect x="456" y="152" width="132" height="132" rx="28" fill="#4CAED8"/>
+
+    <rect x="0" y="304" width="132" height="132" rx="28" fill="#B9E9F4"/>
+    <rect x="152" y="304" width="132" height="132" rx="28" fill="#63C2E3"/>
+    <rect x="304" y="304" width="132" height="132" rx="28" fill="#D7F2F8"/>
+    <rect x="456" y="304" width="132" height="132" rx="28" fill="#82D8F2"/>
+
+    <rect x="0" y="456" width="132" height="132" rx="28" fill="#45B9E0"/>
+    <rect x="152" y="456" width="132" height="132" rx="28" fill="#B4E6F3"/>
+    <rect x="304" y="456" width="132" height="132" rx="28" fill="#70CBE6"/>
+    <rect x="456" y="456" width="132" height="132" rx="28" fill="#E1F5F8"/>
+  </g>
+</svg>

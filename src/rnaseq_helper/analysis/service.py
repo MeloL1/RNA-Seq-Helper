@@ -8,12 +8,14 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from typing import Any, Callable
 from uuid import uuid4
 
 from rnaseq_helper.domain.models import AnalysisPlan, ExpressionMatrix, JobContext, sha256_file
 from rnaseq_helper.r_bridge.client import RBridgeClient, RBridgeError
 from rnaseq_helper.analysis.planning import PlanningService
+from rnaseq_helper.analysis.result_filter import summarize_result
 from rnaseq_helper.services.project_lock import project_directory_lock
 
 
@@ -27,8 +29,9 @@ class AnalysisService:
     APPLICATION_ID = "org.rnaseqhelper.app"
 
     OUTPUT_RELATIVE_PATHS = (
-        Path("analysis-plan.json"),
         Path("analysis/analysis-plan.json"), Path("analysis/deg-result.json"),
+        Path("analysis/result-filter.json"),
+        Path("analysis/gene-annotations.tsv"),
         Path("figures/figure-manifest.json"), Path("figures/pca.png"),
         Path("figures/sample-correlation.png"), Path("figures/p-value-histogram.png"),
         Path("figures/volcano.png"), Path("figures/top-heatmap.png"),
@@ -117,6 +120,8 @@ class AnalysisService:
         )
         self._validate_summary(result.get("summary"), result.get("table"), plan)
         self._validate_plot_matrix(result.get("plot_matrix"), feature_ids, sample_ids)
+        result["active_result_filter"] = plan.result_filter.as_dict()
+        result["display_summary"] = summarize_result(result.get("table", ()), plan.result_filter)
         from rnaseq_helper.services.plot_service import PlotService
         from rnaseq_helper.services.report_service import ReportService
 
@@ -128,6 +133,13 @@ class AnalysisService:
                 self._new_transaction_journal(project_dir, phase="preparing"),
             )
             PlanningService.save(plan, staging_dir)
+            old_annotation_path = project_dir / "analysis" / "gene-annotations.tsv"
+            annotation_path = staging_dir / "analysis" / "gene-annotations.tsv"
+            if old_annotation_path.is_file() and not old_annotation_path.is_symlink():
+                shutil.copy2(old_annotation_path, annotation_path)
+                self._apply_gene_annotations(result, self._read_gene_annotation_overlay(old_annotation_path))
+            else:
+                annotation_path.write_text("feature_key\tgene_symbol\n", encoding="utf-8")
             self._write_result(staging_dir, plan, result)
             figures = PlotService().build(
                 matrix, plan, result,
@@ -143,16 +155,107 @@ class AnalysisService:
             )
             self._raise_if_cancelled(context)
             context.emit("publish", None, "正在保存分析结果；此阶段不可取消")
+            history_pending = self._stage_history_snapshot(project_dir, plan)
             self._publish_outputs(project_dir, staging_dir, context.cancelled)
+            self._commit_history_snapshot(history_pending)
         except OutputPublishRollbackError:
             # Even if moving the failed transaction to its recovery name fails,
             # never let temporary-directory cleanup delete the only old copies.
             preserve_staging = True
             raise
         finally:
+            pending = locals().get("history_pending")
+            if pending is not None and pending.exists():
+                shutil.rmtree(pending, ignore_errors=True)
             if not preserve_staging and staging_dir.exists():
                 shutil.rmtree(staging_dir)
         return result
+
+    @staticmethod
+    def _read_gene_annotation_overlay(path: Path) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        try:
+            with path.open(encoding="utf-8", newline="") as handle:
+                reader = csv.DictReader(handle, delimiter="\t")
+                for row in reader:
+                    key = str(row.get("feature_key") or "").strip()
+                    symbol = str(row.get("gene_symbol") or "").strip()
+                    if key and symbol:
+                        mapping[key] = symbol
+        except (OSError, UnicodeError, csv.Error):
+            return {}
+        return mapping
+
+    @staticmethod
+    def _apply_gene_annotations(result: dict[str, Any], mapping: dict[str, str]) -> None:
+        for row in result.get("table", []):
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("feature_key") or row.get("original_id") or "")
+            if key in mapping:
+                row["gene_symbol"] = mapping[key]
+
+    @classmethod
+    def _stage_history_snapshot(cls, project_dir: Path, plan: AnalysisPlan) -> Path | None:
+        """Stage a complete copy of existing outputs before a later run replaces them."""
+        required = [
+            relative for relative in cls.OUTPUT_RELATIVE_PATHS
+            if relative.as_posix() != "analysis/gene-annotations.tsv"
+        ]
+        existing = [relative for relative in cls.OUTPUT_RELATIVE_PATHS if (project_dir / relative).is_file()]
+        if any(not (project_dir / relative).is_file() for relative in required):
+            return None
+        history_root = project_dir / "analysis" / "history"
+        history_root.mkdir(parents=True, exist_ok=True)
+        pending = history_root / f".pending-{uuid4().hex}"
+        pending.mkdir()
+        try:
+            for relative in existing:
+                source = project_dir / relative
+                target = pending / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            contrast = plan.contrast if isinstance(plan.contrast, dict) else {}
+            files = {
+                relative.as_posix(): sha256_file(pending / relative)
+                for relative in existing
+            }
+            saved_result = json.loads((pending / "analysis" / "deg-result.json").read_text(encoding="utf-8"))
+            project_manifest_path = project_dir / "project.json"
+            project_manifest = json.loads(project_manifest_path.read_text(encoding="utf-8")) if project_manifest_path.is_file() else {}
+            filter_path = pending / "analysis" / "result-filter.json"
+            active_filter = json.loads(filter_path.read_text(encoding="utf-8")) if filter_path.is_file() else plan.result_filter.as_dict()
+            assignments = plan.design.get("assignments", {})
+            manifest = {
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "method": plan.method,
+                "contrast": f"{contrast.get('test', 'test')} − {contrast.get('control', 'control')}",
+                "source_path": project_manifest.get("source_path"),
+                "sample_assignments": dict(assignments) if isinstance(assignments, dict) else {},
+                "result_summary": saved_result.get("summary", {}),
+                "active_result_filter": active_filter,
+                "annotation_status": {
+                    "present": bool((pending / "analysis" / "gene-annotations.tsv").is_file()),
+                    "sha256": sha256_file(pending / "analysis" / "gene-annotations.tsv")
+                    if (pending / "analysis" / "gene-annotations.tsv").is_file() else None,
+                },
+                "files": files,
+            }
+            (pending / "history-manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+            )
+            return pending
+        except Exception:
+            shutil.rmtree(pending, ignore_errors=True)
+            raise
+
+    @staticmethod
+    def _commit_history_snapshot(pending: Path | None) -> None:
+        if pending is None:
+            return
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+        target = pending.parent / f"run-{stamp}-{uuid4().hex[:8]}"
+        os.replace(pending, target)
 
     @staticmethod
     def _publish_outputs(
@@ -812,4 +915,12 @@ class AnalysisService:
         analysis_dir = project_dir / "analysis"
         analysis_dir.mkdir(parents=True, exist_ok=True)
         (analysis_dir / "analysis-plan.json").write_text(json.dumps(plan.as_dict(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        (analysis_dir / "deg-result.json").write_text(json.dumps(result, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+        model_result = {
+            key: value for key, value in result.items()
+            if key not in {"active_result_filter", "display_summary"}
+        }
+        (analysis_dir / "deg-result.json").write_text(json.dumps(model_result, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8")
+        (analysis_dir / "result-filter.json").write_text(
+            json.dumps(plan.result_filter.as_dict(), ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )

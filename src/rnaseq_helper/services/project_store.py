@@ -150,6 +150,7 @@ class ProjectStore:
         )
         warnings: list[str] = transaction_warnings
         source_path_value = manifest.get("source_path")
+        source_path = None
         if isinstance(source_path_value, str) and source_path_value.strip():
             if source_path_value.startswith("["):
                 warnings.append("项目清单已隐藏原始来源路径；只能核验保存的整理矩阵和结果，无法检查原始文件是否仍在。")
@@ -287,6 +288,18 @@ class ProjectStore:
         recipe_id = hashlib.sha256(
             json.dumps(recipe, ensure_ascii=False, sort_keys=True).encode("utf-8")
         ).hexdigest()[:16]
+        source_modality = manifest.get("source_modality")
+        modality_inference_reason = ""
+        if not source_modality:
+            source_modality, modality_inference_reason = cls._infer_legacy_source_modality(
+                manifest, sample_path,
+            )
+            if source_modality:
+                warnings.append(
+                    "旧项目没有保存来源类别；根据其保存的 GEO 来源元数据，"
+                    f"现按“{source_modality}”门禁恢复（{modality_inference_reason}）。"
+                    "既有结果仅作为历史记录；重新分析前须按来源说明重新确认数值类型和尺度。"
+                )
         matrix = ExpressionMatrix(
             matrix_id=matrix_id,
             values=MatrixStoreRef(
@@ -315,7 +328,8 @@ class ProjectStore:
                 recipe.get("fact_confirmations", ()),
             ),
             platform_id=str(manifest["platform_id"]) if manifest.get("platform_id") else None,
-            source_modality=str(manifest["source_modality"]) if manifest.get("source_modality") else None,
+            source_modality=str(source_modality) if source_modality else None,
+            source_path=source_path,
         )
 
         saved_plan = cls._load_plan(root, matrix_digest, feature_path, sample_ids, warnings)
@@ -347,6 +361,50 @@ class ProjectStore:
             and design.get("replicate_structure_confirmed") is True
             and design.get("type") == expected_type
         )
+
+    @classmethod
+    def _infer_legacy_source_modality(
+        cls,
+        manifest: dict[str, Any],
+        sample_metadata_path: Path,
+    ) -> tuple[str | None, str]:
+        """Recover only high-confidence array modality clues omitted by legacy manifests."""
+        source_asset = manifest.get("source_asset")
+        if not isinstance(source_asset, dict) or str(source_asset.get("kind", "")).upper() != "GEO_SERIES_MATRIX":
+            return None, ""
+        series_types = manifest.get("series_types", ())
+        if isinstance(series_types, str):
+            series_types = (series_types,)
+        if isinstance(series_types, (list, tuple)) and any(
+            str(value).strip().casefold() == "expression profiling by array"
+            for value in series_types
+        ):
+            return "MICROARRAY", "保存的 GEO Series_type 标注为 Expression profiling by array"
+
+        try:
+            with sample_metadata_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle, delimiter="\t")
+                processing_values: list[str] = []
+                supplementary_values: list[str] = []
+                for row in reader:
+                    processing_values.extend(
+                        str(value or "") for key, value in row.items()
+                        if key and key.strip().casefold() in {"data_processing", "series_type"}
+                    )
+                    supplementary_values.extend(
+                        str(value or "") for key, value in row.items()
+                        if key and key.strip().casefold() in {"supplementary_file", "supplementary_files"}
+                    )
+        except (OSError, UnicodeError, csv.Error):
+            return None, ""
+        has_affymetrix_processing = any("affymetrix" in value.casefold() for value in processing_values)
+        has_cel_source = any(".cel" in value.casefold() for value in supplementary_values)
+        if has_affymetrix_processing and has_cel_source:
+            return (
+                "MICROARRAY",
+                "保存的 GEO 样本注释同时含 Affymetrix 处理说明和 CEL 来源文件",
+            )
+        return None, ""
 
     @staticmethod
     def _member(root: Path, relative: str) -> Path:
@@ -644,6 +702,30 @@ class ProjectStore:
                         result_hash_mismatch = True
                         result_integrity_valid = False
                     warnings.append(f"既有报告的 {key} 校验失败；相关旧产物不会作为匹配当前项目的结果打开。")
+            expected_filter_hash = report_manifest.get("result_filter_hash")
+            if expected_filter_hash is not None:
+                filter_path = root / "analysis" / "result-filter.json"
+                if (
+                    not filter_path.is_file()
+                    or filter_path.is_symlink()
+                    or sha256_file(filter_path) != str(expected_filter_hash)
+                ):
+                    report_valid = False
+                    result_integrity_valid = False
+                    result_hash_mismatch = True
+                    warnings.append("结果筛选设置与报告清单中的校验值不一致；报告不作为匹配当前项目的结果打开。")
+            expected_annotation_hash = report_manifest.get("gene_annotations_hash")
+            if expected_annotation_hash is not None:
+                annotation_path = root / "analysis" / "gene-annotations.tsv"
+                if (
+                    annotation_path.is_symlink()
+                    or not annotation_path.is_file()
+                    or sha256_file(annotation_path) != str(expected_annotation_hash)
+                ):
+                    report_valid = False
+                    result_integrity_valid = False
+                    result_hash_mismatch = True
+                    warnings.append("后期基因注释与报告清单中的校验值不一致；报告不会作为匹配当前项目的结果打开。")
             figure_manifest_path = root / "figures" / "figure-manifest.json"
             expected_figure_manifest_hash = report_manifest.get("figure_manifest_hash")
             if expected_figure_manifest_hash is None:
