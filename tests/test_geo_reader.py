@@ -34,6 +34,78 @@ def test_geo_series_matrix_reads_table_and_metadata(tmp_path: Path) -> None:
     assert assets[0].kind == "GEO_SERIES_MATRIX"
 
 
+def test_geo_reader_preserves_series_and_sample_processing_statements(tmp_path: Path) -> None:
+    path = tmp_path / "processing_series_matrix.txt"
+    path.write_text(
+        '!Series_data_processing\t"Normalized to the 75th percentile; baseline transformed using the global median."\n'
+        '!Sample_data_processing\t"GCRMA"\t"GCRMA"\n'
+        "!series_matrix_table_begin\nID_REF\tGSM1\tGSM2\nprobe_1\t1\t2\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+
+    result = GeoSeriesMatrixReader().read(path)
+
+    assert result.series_processing == (
+        "Normalized to the 75th percentile; baseline transformed using the global median.",
+    )
+    assert result.sample_metadata["data_processing"] == ("GCRMA", "GCRMA")
+
+
+def test_geo_processing_evidence_redacts_possible_patient_identifiers(tmp_path: Path) -> None:
+    path = tmp_path / "GSE999_processing_series_matrix.txt"
+    path.write_text(
+        '!Sample_data_processing\t"Processing performed for patient 17"\t"Processing performed for patient 18"\n'
+        "!series_matrix_table_begin\nID_REF\tGSM1\tGSM2\nprobe_1\t1\t2\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+
+    asset = AssetScanner().scan((path,)).assets[0]
+    processing_evidence = [item for item in asset.evidence if item.evidence_level == "geo_processing_context"]
+
+    assert len(processing_evidence) == 2
+    assert all(item.excerpt_redacted for item in processing_evidence)
+    assert all("patient 17" not in item.excerpt and "patient 18" not in item.excerpt for item in processing_evidence)
+
+
+def test_geo_processing_evidence_maps_sample_statements_and_suffixed_fields(tmp_path: Path) -> None:
+    path = tmp_path / "GSE999_processing_series_matrix.txt"
+    path.write_text(
+        '!Sample_geo_accession\t"GSM1"\t"GSM2"\n'
+        '!Sample_data_processing\t"GCRMA"\t"RMA"\n'
+        '!Sample_data_processing_2\t"Background corrected"\t"Background corrected"\n'
+        '!Series_data_processing_extra\t"not the exact series field"\n'
+        "!series_matrix_table_begin\nID_REF\tGSM1\tGSM2\nprobe_1\t1\t2\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+
+    result = GeoSeriesMatrixReader().read(path)
+    evidence = [
+        item for item in AssetScanner().scan((path,)).assets[0].evidence
+        if item.evidence_level == "geo_processing_context"
+    ]
+
+    assert result.sample_metadata["data_processing_2"] == ("Background corrected", "Background corrected")
+    assert any(item.location == "!Sample_data_processing_2" for item in evidence)
+    assert any("对应样本：GSM1" in item.basis for item in evidence)
+    assert all("not the exact series field" not in item.excerpt for item in evidence)
+
+
+def test_geo_processing_evidence_reports_omitted_statements(tmp_path: Path) -> None:
+    path = tmp_path / "GSE999_processing_series_matrix.txt"
+    statements = "".join(f'!Series_data_processing\t"step {index}"\n' for index in range(6))
+    path.write_text(
+        statements + "!series_matrix_table_begin\nID_REF\tGSM1\nprobe_1\t1\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+
+    evidence = [
+        item for item in AssetScanner().scan((path,)).assets[0].evidence
+        if item.evidence_level == "geo_processing_context"
+    ]
+
+    assert any("另有 2 条不同的 GEO 处理说明未展开" in item.basis for item in evidence)
+
+
 def test_geo_reader_rejects_mixed_platforms(tmp_path: Path) -> None:
     path = tmp_path / "series_matrix.txt"
     path.write_text(

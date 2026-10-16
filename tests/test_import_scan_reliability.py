@@ -281,12 +281,13 @@ def test_preparation_preview_defers_full_read_until_explicit_completion(tmp_path
 
 def test_validation_blocks_columns_that_were_outside_the_preview(tmp_path: Path) -> None:
     source = tmp_path / "wide.tsv"
-    headers = ["feature", *[f"sample_{index}" for index in range(90)]]
-    rows = [headers, ["gene_a", *["12" for _ in range(90)]], ["gene_b", *["15" for _ in range(90)]]]
+    headers = ["feature", *[f"sample_{index}" for index in range(170)]]
+    rows = [headers, ["gene_a", *["12" for _ in range(170)]], ["gene_b", *["15" for _ in range(170)]]]
     source.write_text("\n".join("\t".join(row) for row in rows) + "\n", encoding="utf-8")
     asset = AssetScanner().scan((source,)).assets[0]
     service = PreparationService()
     preview_session = service.start(asset, tmp_path / "project", preview_only=True)
+    assert preview_session.preview_shape == (3, 80)
     confirmed = service.apply(preview_session, {
         "measurement_type": "RAW_COUNT",
         "value_scale": "LINEAR",
@@ -296,6 +297,30 @@ def test_validation_blocks_columns_that_were_outside_the_preview(tmp_path: Path)
     summary = service.validate(confirmed_complete)
 
     assert any(issue.code == "PREVIEW_LIMIT_EXCEEDED" for issue in summary.issues)
+
+
+def test_preview_covers_a_realistic_wide_geo_sample_axis(tmp_path: Path) -> None:
+    source = tmp_path / "wide_series_matrix.txt"
+    headers = ["ID_REF", *[f"GSM{index:06d}" for index in range(1, 145)]]
+    rows = [headers, ["probe_a", *[str(index) for index in range(144)]]]
+    source.write_text(
+        "!Sample_geo_accession = " + "\t".join(headers[1:]) + "\n"
+        "!series_matrix_table_begin\n"
+        + "\n".join("\t".join(row) for row in rows)
+        + "\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+
+    scanner = AssetScanner()
+    asset = scanner.scan((source,)).assets[0]
+    session = PreparationService().start(asset, tmp_path / "project", preview_only=True)
+    preview = PreparationService().preview(session, window=(0, 5))
+
+    assert session.preview_shape == (2, 145)
+    assert session.raw_table.is_complete is True
+    assert preview.column_count_hint == 145
+    assert len(preview.rows[0]) == 145
+    assert preview.rows[0][-1] == "GSM000144"
 
 
 def test_geo_preview_is_bounded_and_followup_full_read_is_cancellable(tmp_path: Path) -> None:

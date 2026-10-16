@@ -61,8 +61,25 @@ run_micro_deseq2 <- function(payload, profile_id) {
   colnames(count_data) <- sample_ids
   col_data <- data.frame(group = groups, row.names = sample_ids)
   dds <- DESeq2::DESeqDataSetFromMatrix(countData = count_data, colData = col_data, design = ~ group)
-  dds <- DESeq2::DESeq(dds, quiet = TRUE)
-  res <- DESeq2::results(dds, contrast = c("group", payload$test, payload$control), independentFiltering = FALSE)
+  dds <- DESeq2::DESeq(
+    dds,
+    test = "Wald",
+    fitType = "parametric",
+    sfType = "ratio",
+    betaPrior = FALSE,
+    minReplicatesForReplace = 7,
+    useT = FALSE,
+    minmu = 0.5,
+    parallel = FALSE,
+    quiet = TRUE
+  )
+  res <- DESeq2::results(
+    dds,
+    contrast = c("group", payload$test, payload$control),
+    cooksCutoff = TRUE,
+    independentFiltering = FALSE,
+    pAdjustMethod = "BH"
+  )
   table <- data.frame(
     feature_id = rownames(res),
     baseMean = as.numeric(res$baseMean),
@@ -138,7 +155,9 @@ build_design <- function(payload) {
     if (!is.null(values) && length(values) > 0) {
       value_map <- unlist(values)
       design_data[[term_name]] <- factor(as.character(value_map[sample_ids]))
-      design_terms <- c(design_terms, term_name)
+      if (term_name != "batch" || nlevels(droplevels(design_data[[term_name]])) > 1) {
+        design_terms <- c(design_terms, term_name)
+      }
     }
   }
   design_terms <- c(design_terms, "group")
@@ -152,7 +171,7 @@ build_design <- function(payload) {
   if (length(group_columns) != 2) stop("设计矩阵中无法找到恰好两列组别效应")
   colnames(design)[group_columns] <- c("control", "test")
   for (term_name in c("batch", "subject")) {
-    if (term_name %in% names(design_data)) {
+    if (term_name %in% names(design_data) && term_name %in% design_terms) {
       covariate <- stats::model.matrix(
         stats::as.formula(paste("~", term_name)),
         data = design_data
@@ -365,7 +384,9 @@ run_analyze_limma <- function(payload, profile_id) {
     ),
     parameters = list(
       transform = transform,
-      filter_threshold = ifelse(transform == "log2(x+1)", 1, NA),
+      filter_threshold = ifelse(
+        transform == "log2(x+1)", as.numeric(payload$filter_threshold %||% 1), NA
+      ),
       min_samples = min_samples,
       trend = TRUE,
       robust = TRUE,
@@ -400,6 +421,9 @@ run_analyze_deseq2 <- function(payload, profile_id) {
       any(count_data != floor(count_data))) {
     stop("DESeq2 输入必须是有限的非负整数 count")
   }
+  if (any(count_data > .Machine$integer.max)) {
+    stop("DESeq2 count 超出当前 R 运行时可安全处理的整数范围")
+  }
   count_data <- matrix(as.integer(count_data), nrow = nrow(count_data))
   feature_ids <- as.character(unlist(payload$feature_ids))
   sample_ids <- as.character(unlist(payload$sample_ids))
@@ -416,7 +440,18 @@ run_analyze_deseq2 <- function(payload, profile_id) {
   )
   dispersion_fallback <- FALSE
   dds <- tryCatch(
-    DESeq2::DESeq(dds, quiet = TRUE),
+    DESeq2::DESeq(
+      dds,
+      test = "Wald",
+      fitType = "parametric",
+      sfType = "ratio",
+      betaPrior = FALSE,
+      minReplicatesForReplace = 7,
+      useT = FALSE,
+      minmu = 0.5,
+      parallel = FALSE,
+      quiet = TRUE
+    ),
     error = function(error) {
       message <- conditionMessage(error)
       if (!grepl("all gene-wise dispersion estimates", message, fixed = TRUE)) {
@@ -425,15 +460,19 @@ run_analyze_deseq2 <- function(payload, profile_id) {
       # DESeq2 documents this path for designs where the dispersion trend
       # cannot be fitted (for example, a tiny synthetic smoke-test matrix).
       # Keep the DESeq2 count model and make the downgrade explicit in output.
-      fallback <- DESeq2::estimateSizeFactors(dds)
-      fallback <- DESeq2::estimateDispersionsGeneEst(fallback, quiet = TRUE)
+      fallback <- DESeq2::estimateSizeFactors(dds, type = "ratio")
+      fallback <- DESeq2::estimateDispersionsGeneEst(
+        fallback, minmu = 0.5, quiet = TRUE
+      )
       gene_dispersion <- S4Vectors::mcols(fallback)$dispGeneEst
       if (any(!is.finite(gene_dispersion) | gene_dispersion <= 0)) {
         stop(error)
       }
       DESeq2::dispersions(fallback) <- gene_dispersion
       dispersion_fallback <<- TRUE
-      DESeq2::nbinomWaldTest(fallback, quiet = TRUE)
+      DESeq2::nbinomWaldTest(
+        fallback, betaPrior = FALSE, useT = FALSE, minmu = 0.5, quiet = TRUE
+      )
     }
   )
   fdr_threshold <- as.numeric(payload$fdr_threshold %||% 0.05)
@@ -442,11 +481,24 @@ run_analyze_deseq2 <- function(payload, profile_id) {
   res <- DESeq2::results(
     dds,
     contrast = c("group", as.character(payload$test), as.character(payload$control)),
-    alpha = fdr_threshold
+    alpha = fdr_threshold,
+    cooksCutoff = TRUE,
+    independentFiltering = TRUE,
+    pAdjustMethod = "BH"
+  )
+  # Use DESeq2's own Cook's cutoff and sample-eligibility rules for the
+  # diagnostic. Reimplementing those rules here with a hand-written F cutoff
+  # can misclassify NA p-values, especially once batch/subject terms are used.
+  res_without_cooks <- DESeq2::results(
+    dds,
+    contrast = c("group", as.character(payload$test), as.character(payload$control)),
+    alpha = fdr_threshold,
+    cooksCutoff = FALSE,
+    independentFiltering = FALSE,
+    pAdjustMethod = "BH"
   )
   groups <- as.character(unlist(payload$groups))
   means <- row_means_by_group(count_data, groups, payload$control, payload$test)
-  cooks <- tryCatch(DESeq2::assays(dds)[["cooks"]], error = function(e) NULL)
   base_mean <- rep(NA_real_, length(feature_ids))
   pvalue <- rep(NA_real_, length(feature_ids))
   padj <- rep(NA_real_, length(feature_ids))
@@ -463,13 +515,10 @@ run_analyze_deseq2 <- function(payload, profile_id) {
   reasons <- rep("all_zero", length(feature_ids))
   reasons[fit_keep] <- ""
   reasons[fit_keep & is.na(padj) & is.finite(pvalue)] <- "independent_filtering"
-  outlier <- fit_keep & is.na(padj) & is.na(pvalue) & base_mean > 0
-  if (!is.null(cooks)) {
-    outlier_rows_fit <- apply(cooks, 1, function(values) any(is.finite(values) & values > stats::qf(0.99, 1, max(1, ncol(count_data) - 2))))
-    outlier_rows <- rep(FALSE, length(feature_ids))
-    outlier_rows[fit_keep] <- outlier_rows_fit
-    reasons[outlier & outlier_rows] <- "cooks_outlier_or_unestimable"
-  }
+  pvalue_without_cooks <- rep(NA_real_, length(feature_ids))
+  pvalue_without_cooks[res_indices] <- as.numeric(res_without_cooks$pvalue)
+  cooks_filtered <- fit_keep & is.na(pvalue) & is.finite(pvalue_without_cooks)
+  reasons[cooks_filtered] <- "cooks_outlier"
   reasons[fit_keep & is.na(padj) & reasons == ""] <- "not_estimable"
   tested <- is.finite(pvalue)
   plot_keep <- fit_keep
@@ -544,13 +593,27 @@ run_analyze_deseq2 <- function(payload, profile_id) {
     diagnostics = list(
       independent_filtering_na = sum(reasons == "independent_filtering"),
       all_zero = sum(reasons == "all_zero"),
-      outlier_or_unestimable = sum(grepl("outlier|unestimable", reasons)),
+      outlier_or_unestimable = sum(reasons %in% c("cooks_outlier", "not_estimable")),
       pvalue_count = sum(is.finite(pvalue))
     ),
     parameters = list(
       p_adjust_method = "BH",
       independent_filtering = TRUE,
+      independent_filter_statistic = "baseMean",
+      independent_filter_threshold = {
+        threshold <- S4Vectors::metadata(res)$filterThreshold
+        if (is.null(threshold) || !length(threshold)) NULL else as.numeric(threshold[[1]])
+      },
+      size_factor_type = "ratio",
       dispersion_estimation = if (dispersion_fallback) "gene-wise-fallback" else "trend",
+      dispersion_fit_type = if (dispersion_fallback) "gene-wise" else "parametric",
+      test = "Wald",
+      beta_prior = FALSE,
+      min_replicates_for_replace = 7,
+      use_t = FALSE,
+      min_mu = 0.5,
+      parallel = FALSE,
+      cooks_cutoff = TRUE,
       alpha = fdr_threshold,
       design = deparse(design_info$formula),
       plot_transform = plot_transform,

@@ -122,6 +122,19 @@ class GroupingService:
             missing_batches = [name for name in active_names if not batch.get(name)]
             if missing_batches:
                 issues.append(Issue("INCOMPLETE_BATCH_METADATA", IssueSeverity.BLOCKING, "批次协变量只填写了部分样本。", "请为每个样本填写批次，或清空批次列"))
+            else:
+                active_batch_levels = {
+                    str(batch.get(name, "")).strip()
+                    for name in active_names
+                    if str(batch.get(name, "")).strip()
+                }
+                if len(active_batch_levels) == 1:
+                    issues.append(Issue(
+                        "BATCH_NO_VARIATION",
+                        IssueSeverity.WARNING,
+                        "本次纳入的样本都属于同一个批次，无法估计批次差异；软件不会把这个批次列加入统计模型。",
+                        "如批次信息填写有误，请返回修改；否则可继续分析，但结果不含批次校正",
+                    ))
             group_batches: dict[str, set[str]] = {}
             for sample, value in batch.items():
                 group = assignments.get(sample)

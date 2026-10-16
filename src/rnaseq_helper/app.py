@@ -44,10 +44,11 @@ def _gui() -> int:
         from PySide6.QtGui import QAction, QColor, QPalette
         from PySide6.QtWidgets import (
             QApplication, QDialog, QGroupBox, QHBoxLayout, QLabel, QMainWindow,
-            QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+            QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
         )
         from rnaseq_helper.ui.background_jobs import BackgroundJobCloseGuard
         from rnaseq_helper.ui.pages import AnalysisPage, ImportPage, ResultsPage
+        from rnaseq_helper.ui.workers.project_worker import ProjectLoadWorker
     except ImportError:
         print("无法启动 GUI：请先安装 PySide6。可运行 --self-check 或 --micro-test。", file=sys.stderr)
         return 2
@@ -186,6 +187,7 @@ def _gui() -> int:
 
     ready_steps = [True, False, False, False]
     current_step = 0
+    project_jobs: list[tuple[QThread, object]] = []
 
     def refresh_stepper() -> None:
         for index, step_button in enumerate(step_buttons):
@@ -240,6 +242,71 @@ def _gui() -> int:
 
     import_page.matrixReady.connect(matrix_prepared)
     analysis_page.analysisReady.connect(analysis_finished)
+
+    def open_saved_project(project_dir: str) -> None:
+        if import_page._active_thread is not None and import_page._active_thread.isRunning():
+            import_page.status_label.setText("请先等待当前导入/整理任务完成或取消，再打开已保存项目。")
+            return
+        if any(current_thread.isRunning() for current_thread, _worker, _context in analysis_page._jobs):
+            import_page.status_label.setText("请先等待当前分析任务完成或取消，再打开已保存项目。")
+            return
+        if any(current_thread.isRunning() for current_thread, _worker in project_jobs):
+            import_page.status_label.setText("正在读取另一个项目；请等待校验完成。")
+            return
+        import_page.open_project_button.setEnabled(False)
+        import_page.status_label.setText("正在检查项目清单、矩阵、样本顺序和既有结果……")
+        project_thread = QThread(window)
+        project_worker = ProjectLoadWorker(Path(project_dir))
+        import_page.begin_external_check(project_worker.request_cancel)
+        project_jobs.append((project_thread, project_worker))
+        project_worker.moveToThread(project_thread)
+
+        def project_loaded(snapshot: object) -> None:
+            import_page.end_external_check()
+            analysis_page.set_matrix(
+                snapshot.matrix,
+                initial_design=(snapshot.saved_plan or {}).get("design"),
+                restored_project=True,
+            )
+            results_page.set_matrix(snapshot.matrix)
+            results_page.set_saved_project(snapshot)
+            ready_steps[1] = False
+            ready_steps[2] = True
+            ready_steps[3] = True
+            show_workflow_step(3)
+            import_page.status_label.setText(
+                "项目已恢复。可在“确认样本”中核对或修改分组；点击“开始分析”后将直接替换原项目中的分析计划、结果、图表和报告。"
+            )
+
+        def project_failed(message: str) -> None:
+            import_page.end_external_check(f"项目未能恢复：{message}")
+            import_page.status_label.setText(f"项目未能恢复：{message}")
+            QMessageBox.warning(window, "无法打开项目", message)
+
+        def project_cancelled() -> None:
+            import_page.end_external_check("已取消打开项目；没有启动新分析。若有中断事务，软件已按记录恢复。")
+
+        project_worker.completed.connect(project_loaded, Qt.ConnectionType.QueuedConnection)
+        project_worker.failed.connect(project_failed, Qt.ConnectionType.QueuedConnection)
+        project_worker.progress.connect(import_page.update_external_check, Qt.ConnectionType.QueuedConnection)
+        project_worker.cancelled.connect(project_cancelled, Qt.ConnectionType.QueuedConnection)
+        project_worker.completed.connect(project_thread.quit, Qt.ConnectionType.QueuedConnection)
+        project_worker.failed.connect(project_thread.quit, Qt.ConnectionType.QueuedConnection)
+        project_worker.cancelled.connect(project_thread.quit, Qt.ConnectionType.QueuedConnection)
+        project_thread.started.connect(project_worker.run, Qt.ConnectionType.QueuedConnection)
+        project_thread.finished.connect(project_worker.deleteLater)
+        project_thread.finished.connect(project_thread.deleteLater)
+
+        def project_thread_finished(current_thread=project_thread, current_worker=project_worker) -> None:
+            if (current_thread, current_worker) in project_jobs:
+                project_jobs.remove((current_thread, current_worker))
+            import_page.open_project_button.setEnabled(True)
+            import_page.end_external_check()
+
+        project_thread.finished.connect(project_thread_finished)
+        project_thread.start()
+
+    import_page.projectOpenRequested.connect(open_saved_project)
     workflow.setMinimumWidth(760)
     window.setCentralWidget(workflow)
     refresh_stepper()
@@ -248,6 +315,7 @@ def _gui() -> int:
 
     def active_threads() -> tuple[QThread, ...]:
         threads = [current_thread for current_thread, _worker in active_jobs]
+        threads.extend(current_thread for current_thread, _worker in project_jobs)
         threads.extend(current_thread for current_thread, _worker, _context in analysis_page._jobs)
         if import_page._active_thread is not None:
             threads.append(import_page._active_thread)
@@ -267,6 +335,8 @@ def _gui() -> int:
             context.cancel_event.set()
         if import_page._active_worker is not None:
             import_page._active_worker.request_cancel()
+        for _current_thread, worker in tuple(project_jobs):
+            worker.request_cancel()
 
     def show_safe_close_status() -> None:
         message = "正在安全结束后台任务；任务结束后窗口会自动关闭。"

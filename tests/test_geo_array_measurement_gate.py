@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 from rnaseq_helper.domain.models import MeasurementType, ValueScale
-from rnaseq_helper.analysis.planning import PlanningService
+from tests._planning import PlanningService
 from rnaseq_helper.preparation.service import PreparationService
 from rnaseq_helper.recognition.scanner import AssetScanner
 
@@ -75,8 +75,21 @@ def test_geo_array_rejects_rnaseq_units_but_accepts_generic_expression_signal(tm
     manifest = json.loads((tmp_path / "signal" / "project" / "project.json").read_text(encoding="utf-8"))
     assert manifest["source_modality"] == "MICROARRAY"
     assert manifest["series_types"] == ["Expression profiling by array"]
-    assert plan.method == "LIMMA_ON_LOG_EXPRESSION"
-    assert "SOURCE_MODALITY_MEASUREMENT_CONFLICT" not in {issue.code for issue in plan.blockers}
+    assert plan.method == "BLOCKED"
+    assert "MICROARRAY_REQUIRES_LOG2" in {issue.code for issue in plan.blockers}
+
+    confirmed_log_matrix = replace(
+        signal_matrix,
+        value_scale=ValueScale.LOG2,
+        input_transform="already_log2",
+        measurement_provenance="user-confirmed value_scale=log2",
+    )
+    log_plan = PlanningService().build(confirmed_log_matrix, {
+        "GSM1": "control", "GSM2": "control", "GSM3": "control",
+        "GSM4": "test", "GSM5": "test", "GSM6": "test",
+    })
+    assert log_plan.method == "LIMMA_ON_LOG_EXPRESSION"
+    assert "MICROARRAY_REQUIRES_LOG2" not in {issue.code for issue in log_plan.blockers}
 
 
 def test_analysis_planner_also_blocks_geo_array_fpkm_bypass(tmp_path: Path) -> None:

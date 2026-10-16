@@ -35,6 +35,7 @@ class AssetScanner:
     SUPPORTED_TABLES = TableReader.TEXT_SUFFIXES | TableReader.EXCEL_SUFFIXES
     PREVIEW_ROWS = 40
     PREVIEW_COLUMNS = 80
+    GEO_PREVIEW_COLUMNS = 160
     SIDECAR_MAX_BYTES = 256 * 1024
     SIDECAR_TOTAL_MAX_BYTES = 512 * 1024
     SIDECAR_MAX_FILES = 4
@@ -225,7 +226,7 @@ class AssetScanner:
                 geo = GeoSeriesMatrixReader().read(
                     path,
                     max_table_rows=self.PREVIEW_ROWS,
-                    max_table_columns=self.PREVIEW_COLUMNS,
+                    max_table_columns=self.GEO_PREVIEW_COLUMNS,
                     progress=report_geo_progress,
                     cancelled=cancelled,
                 )
@@ -250,7 +251,7 @@ class AssetScanner:
                     geo = GeoSeriesMatrixReader().read(
                         path,
                         max_table_rows=self.PREVIEW_ROWS,
-                        max_table_columns=self.PREVIEW_COLUMNS,
+                        max_table_columns=self.GEO_PREVIEW_COLUMNS,
                         progress=report_geo_progress,
                         cancelled=cancelled,
                     )
@@ -278,7 +279,7 @@ class AssetScanner:
                     geo = GeoSeriesMatrixReader().read(
                         path,
                         max_table_rows=self.PREVIEW_ROWS,
-                        max_table_columns=self.PREVIEW_COLUMNS,
+                        max_table_columns=self.GEO_PREVIEW_COLUMNS,
                         progress=report_geo_progress,
                         cancelled=cancelled,
                     )
@@ -387,6 +388,56 @@ class AssetScanner:
                 str(path), 0.99, "source_modality", "MICROARRAY", "!Series_type",
                 "Expression profiling by array", "geo_series_type",
             ))
+        processing_sources = [("!Series_data_processing", geo.series_processing, False)]
+        sample_fields = sorted(
+            (key, values) for key, values in geo.sample_metadata.items()
+            if key == "data_processing" or key.startswith("data_processing_")
+        )
+        processing_sources.extend(
+            (f"!Sample_{field_name}", values, True)
+            for field_name, values in sample_fields
+        )
+        for location, values, is_sample_level in processing_sources:
+            distinct_values: dict[str, list[str]] = {}
+            accession_alignment = is_sample_level and len(values) == len(geo.sample_accessions)
+            for index, value in enumerate(values):
+                cleaned = " ".join(str(value).split())
+                if cleaned:
+                    sample_list = distinct_values.setdefault(cleaned, [])
+                    if accession_alignment:
+                        sample_list.append(geo.sample_accessions[index])
+            statements = list(distinct_values.items())
+            for statement, accessions in statements[:4]:
+                sensitive = may_contain_sensitive_metadata(statement)
+                excerpt = (
+                    "[处理说明含可能的个人或样本标识，已隐藏整句]"
+                    if sensitive else statement[:400]
+                )
+                if not sensitive and len(statement) > 400:
+                    excerpt += "…（已截短）"
+                if is_sample_level and accession_alignment:
+                    if len(accessions) == len(geo.sample_accessions):
+                        sample_note = f"适用于全部 {len(accessions)} 个 GEO 样本；"
+                    else:
+                        shown_accessions = "、".join(accessions[:3])
+                        if len(accessions) > 3:
+                            shown_accessions += f"等 {len(accessions)} 个样本"
+                        sample_note = f"对应样本：{shown_accessions}；"
+                elif is_sample_level:
+                    sample_note = "样本对应关系无法从当前字段可靠对齐；"
+                else:
+                    sample_note = ""
+                evidence.append(Evidence(
+                    f"GEO 文件内的处理说明（{sample_note}只供核对，不据此猜测单位或转换）。",
+                    str(path), 0.95, "processing_context", "GEO_PROCESSING_TEXT", location,
+                    excerpt, "geo_processing_context", sensitive,
+                ))
+            if len(statements) > 4:
+                evidence.append(Evidence(
+                    f"另有 {len(statements) - 4} 条不同的 GEO 处理说明未展开；请查看原始 GEO 文件。",
+                    str(path), 0.95, "processing_context", "GEO_PROCESSING_TEXT", location,
+                    "", "geo_processing_context",
+                ))
         return tuple(evidence)
 
     @staticmethod

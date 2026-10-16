@@ -17,6 +17,7 @@ class ImportProgress:
     total: int | None = None
     label: str = ""
     cancellable: bool = True
+    unit: str = ""
 
 
 class ImportTaskWorker(QObject):

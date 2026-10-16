@@ -27,6 +27,7 @@ class GeoSeriesMatrix:
     raw_table: RawTable
     sample_metadata: dict[str, tuple[str, ...]] = field(default_factory=dict)
     series_types: tuple[str, ...] = ()
+    series_processing: tuple[str, ...] = ()
 
 
 class GeoSeriesMatrixReader:
@@ -46,6 +47,7 @@ class GeoSeriesMatrixReader:
         platform_ids: list[str] = []
         sample_titles: list[str] = []
         series_types: list[str] = []
+        series_processing: list[str] = []
         sample_metadata: dict[str, list[str]] = {}
         table_rows: list[tuple[str, ...]] = []
         row_limit_reached = False
@@ -83,6 +85,8 @@ class GeoSeriesMatrixReader:
                     sample_titles.extend(_metadata_values(line))
                 elif line.startswith("!Series_type"):
                     series_types.extend(_metadata_values(line))
+                elif line.split("\t", 1)[0].partition("=")[0].strip() == "!Series_data_processing":
+                    series_processing.extend(_metadata_values(line))
                 elif line.startswith("!Sample_"):
                     # GEO 官方文件通常使用制表符，部分导出器才使用等号；
                     # 不能用 partition("=") 处理前一种格式，否则整行会变成字段名。
@@ -118,6 +122,7 @@ class GeoSeriesMatrixReader:
         return GeoSeriesMatrix(
             path, tuple(sample_accessions), tuple(platform_ids), tuple(sample_titles), raw,
             {key: tuple(values) for key, values in sample_metadata.items()}, tuple(series_types),
+            tuple(series_processing),
         )
 
     @staticmethod

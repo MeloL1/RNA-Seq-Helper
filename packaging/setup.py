@@ -20,7 +20,7 @@ OPTIONS = {
         "CFBundleName": "RNA-Seq Helper",
         "CFBundleDisplayName": "RNA-Seq Helper",
         "CFBundleIdentifier": "org.rnaseqhelper.app",
-        "CFBundleShortVersionString": "0.1.0",
+        "CFBundleShortVersionString": "0.30.0",
     },
 }
 

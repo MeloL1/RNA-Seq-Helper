@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rnaseq-helper"
-version = "0.1.0"
+version = "0.30.0"
 description = "A local, auditable RNA-seq preparation and analysis helper."
 readme = "README.md"
 requires-python = ">=3.11"

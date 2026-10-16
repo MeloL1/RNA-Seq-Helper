@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import gzip
 import shutil
 import tarfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Callable
@@ -55,6 +57,8 @@ class ArchiveService:
             return self._inspect_zip(path, limits)
         if tarfile.is_tarfile(path):
             return self._inspect_tar(path, limits)
+        if path.name.lower().endswith(".gz"):
+            return self._inspect_gzip(path, limits)
         raise ArchiveSafetyError("文件不是可识别的 zip/tar 压缩包")
 
     def extract(
@@ -80,7 +84,20 @@ class ArchiveService:
             )
         target_dir.mkdir(parents=True, exist_ok=True)
         extracted: list[Path] = []
-        if manifest.archive_type == "zip":
+        if manifest.archive_type == "gzip":
+            member = manifest.members[0]
+            destination = self._safe_destination(target_dir, member.name)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                with gzip.open(manifest.source_path, "rb") as source, destination.open("wb") as target:
+                    self._copy_cancellable_bounded(source, target, member.size, cancelled)
+            except (OSError, EOFError, zlib.error, ArchiveSafetyError) as exc:
+                destination.unlink(missing_ok=True)
+                raise ArchiveSafetyError(f"gzip 文件无法完整展开：{exc}") from exc
+            extracted.append(destination)
+            if progress:
+                progress(1, 1, member.name)
+        elif manifest.archive_type == "zip":
             with zipfile.ZipFile(manifest.source_path) as archive:
                 for index, member in enumerate(manifest.members, start=1):
                     if cancelled and cancelled():
@@ -170,6 +187,22 @@ class ArchiveService:
             target.write(block)
 
     @staticmethod
+    def _copy_cancellable_bounded(source, target, expected_size: int, cancelled: Callable[[], bool] | None) -> None:
+        copied = 0
+        while True:
+            if cancelled and cancelled():
+                raise ArchiveCancelled("已取消 gzip 展开")
+            block = source.read(1024 * 1024)
+            if not block:
+                break
+            copied += len(block)
+            if copied > expected_size:
+                raise ArchiveSafetyError("gzip 展开内容超过已检查的大小")
+            target.write(block)
+        if copied != expected_size:
+            raise ArchiveSafetyError("gzip 展开内容与已检查的大小不一致")
+
+    @staticmethod
     def _is_nested_container(path: Path) -> bool:
         """gzip 文本（例如 GEO .txt.gz）不是 tar 容器，不再误当作嵌套包。"""
         if not path.is_file() or path.suffix.lower() not in {".zip", ".tar", ".gz", ".tgz"}:
@@ -226,6 +259,34 @@ class ArchiveService:
                     raise ArchiveSafetyError("压缩包整体压缩比异常，疑似压缩炸弹")
                 members.append(ArchiveMember(info.name, info.size, info.size, False, info.isdir()))
         return ArchiveManifest(path, "tar", tuple(members), total, True)
+
+    @staticmethod
+    def _inspect_gzip(path: Path, limits: ArchiveLimits) -> ArchiveManifest:
+        compressed_size = max(1, path.stat().st_size)
+        member_name = path.name[:-3]
+        if not member_name.strip():
+            raise ArchiveSafetyError("gzip 文件名缺少解压后的文件名")
+        ArchiveService._validate_name(member_name, limits)
+        total = 0
+        try:
+            with gzip.open(path, "rb") as source:
+                while True:
+                    block = source.read(1024 * 1024)
+                    if not block:
+                        break
+                    total += len(block)
+                    if total > limits.max_member_bytes:
+                        raise ArchiveSafetyError(f"gzip 展开文件过大：{member_name}")
+                    if total > limits.max_total_bytes:
+                        raise ArchiveSafetyError("压缩包展开总大小超过安全上限")
+                    if total / compressed_size > limits.max_compression_ratio:
+                        raise ArchiveSafetyError("压缩比异常，疑似压缩炸弹")
+        except ArchiveSafetyError:
+            raise
+        except (OSError, EOFError, zlib.error) as exc:
+            raise ArchiveSafetyError(f"gzip 文件损坏或无法读取：{exc}") from exc
+        member = ArchiveMember(member_name, total, path.stat().st_size)
+        return ArchiveManifest(path, "gzip", (member,), total, True)
 
     @staticmethod
     def _validate_name(name: str, limits: ArchiveLimits) -> None:

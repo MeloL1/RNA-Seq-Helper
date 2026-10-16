@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from rnaseq_helper.analysis.planning import PlanningService
+from tests._planning import PlanningService
 from rnaseq_helper.domain.models import (
     ExpressionMatrix,
     MatrixStoreRef,

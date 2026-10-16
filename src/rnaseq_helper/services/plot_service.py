@@ -21,9 +21,16 @@ PALETTE = {"up": "#D55E00", "down": "#0072B2", "ns": "#999999"}
 class PlotService:
     """按统一矩阵和固定阈值生成五张离线诊断/结果图。"""
 
-    def build(self, matrix: ExpressionMatrix, plan: AnalysisPlan, result: dict[str, Any]) -> dict[str, Path]:
+    def build(
+        self,
+        matrix: ExpressionMatrix,
+        plan: AnalysisPlan,
+        result: dict[str, Any],
+        output_dir: Path | None = None,
+        manifest_dir: Path | None = None,
+    ) -> dict[str, Path]:
         project_dir = matrix.values.path.parent.parent
-        figure_dir = project_dir / "figures"
+        figure_dir = Path(output_dir) if output_dir is not None else project_dir / "figures"
         figure_dir.mkdir(parents=True, exist_ok=True)
         feature_ids, sample_ids, plot_values, plot_transform = self._plot_matrix(result)
         display_labels = self._display_labels(result, feature_ids)
@@ -47,7 +54,11 @@ class PlotService:
             ),
         }
         (figure_dir / "figure-manifest.json").write_text(
-            json.dumps({key: str(path) for key, path in figures.items()}, ensure_ascii=False, indent=2) + "\n",
+            json.dumps(
+                {key: f"figures/{path.name}" for key, path in figures.items()},
+                ensure_ascii=False,
+                indent=2,
+            ) + "\n",
             encoding="utf-8",
         )
         return figures

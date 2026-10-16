@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import math
+import os
 import re
+import shutil
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -32,6 +36,7 @@ class WizardSession:
     reference_path: Path | None = None
     geo_matrix: GeoSeriesMatrix | None = None
     preview_shape: tuple[int, int] | None = None
+    source_signature: tuple[int, int, int, int] | None = None
 
 
 class PreparationBlocked(RuntimeError):
@@ -72,16 +77,22 @@ class PreparationService:
         if cancelled and cancelled():
             raise RuntimeError("已取消读取表格")
         path = asset.source_paths[0]
+        source_signature = self._source_signature(path)
+        effective_preview_columns = (
+            160 if asset.kind == "GEO_SERIES_MATRIX" else preview_columns
+        )
         sheets = (None,) if asset.kind == "GEO_SERIES_MATRIX" else self.reader.list_sheets(path)
         sheet = sheet_name if sheet_name in sheets else sheets[0]
         raw, geo_matrix = self._read_asset(
             asset,
             sheet,
             max_rows=preview_rows if preview_only else None,
-            max_columns=preview_columns if preview_only else None,
+            max_columns=effective_preview_columns if preview_only else None,
             progress=progress,
             cancelled=cancelled,
         )
+        if self._source_signature(path) != source_signature:
+            raise ValueError("来源文件在预览读取期间发生变化；请确认文件稳定后重新导入。")
         header_candidates = self.candidate_header_rows(raw.rows)
         header = header_candidates[0] if header_candidates else 0
         width = raw.column_count
@@ -100,6 +111,7 @@ class PreparationService:
             str(uuid4()), 0, asset, raw, recipe, project_dir,
             geo_matrix=geo_matrix,
             preview_shape=(raw.row_count, raw.column_count),
+            source_signature=source_signature,
         )
 
     def complete_read(
@@ -110,6 +122,11 @@ class PreparationService:
         cancelled: Callable[[], bool] | None = None,
     ) -> WizardSession:
         """在用户确认表格结构后，于后台读取完整数据用于最终校验。"""
+        if (
+            session.source_signature is not None
+            and self._source_signature(session.asset.source_paths[0]) != session.source_signature
+        ):
+            raise ValueError("来源文件在预览后发生变化；请重新导入，避免把不同版本的数据混在一起。")
         if session.raw_table.is_complete:
             return session
         if cancelled and cancelled():
@@ -120,6 +137,11 @@ class PreparationService:
             progress=progress,
             cancelled=cancelled,
         )
+        if (
+            session.source_signature is not None
+            and self._source_signature(session.asset.source_paths[0]) != session.source_signature
+        ):
+            raise ValueError("来源文件在完整读取期间发生变化；请重新导入后再整理。")
         return replace(
             session,
             raw_table=raw,
@@ -155,7 +177,7 @@ class PreparationService:
         recipe = self._patch_recipe(session.recipe, patch or {})
         rows = self._view_rows(session.raw_table.rows, recipe.transpose)
         start, count = window
-        shown = tuple(tuple(cell for cell in row[:80]) for row in rows[start:start + count])
+        shown = tuple(tuple(cell for cell in row[:160]) for row in rows[start:start + count])
         return TablePreview(session.raw_table.path, recipe.sheet_name, shown, len(rows), max((len(row) for row in rows), default=0), tuple(self.candidate_header_rows(rows)), recipe.transpose)
 
     def apply(self, session: WizardSession, decision: Mapping[str, Any]) -> WizardSession:
@@ -232,8 +254,16 @@ class PreparationService:
                     issues.append(Issue("NONFINITE_VALUE", IssueSeverity.BLOCKING, f"第 {row_number} 行存在 Inf/NaN。", "请回到原表修正异常值"))
                     continue
                 numeric_count += 1
-                if session.recipe.measurement_type == MeasurementType.RAW_COUNT and (number < 0 or not number.is_integer()):
-                    issues.append(Issue("INVALID_RAW_COUNT", IssueSeverity.BLOCKING, f"第 {row_number} 行含负数或非整数 count。", "请确认原始 count 文件而不是四舍五入后的表达表"))
+                if session.recipe.measurement_type == MeasurementType.RAW_COUNT:
+                    if number < 0 or not number.is_integer():
+                        issues.append(Issue("INVALID_RAW_COUNT", IssueSeverity.BLOCKING, f"第 {row_number} 行含负数或非整数 count。", "请确认原始 count 文件而不是四舍五入后的表达表"))
+                    elif number > 2_147_483_647:
+                        issues.append(Issue(
+                            "RAW_COUNT_EXCEEDS_INTEGER_RANGE",
+                            IssueSeverity.BLOCKING,
+                            f"第 {row_number} 行的 count 超出当前 DESeq2 运行时可安全处理的整数范围。",
+                            "请核实输入文件是否为原始整数 count；不要手动缩放或取整后继续分析",
+                        ))
                 if session.recipe.value_scale == ValueScale.LINEAR and number < 0:
                     issues.append(Issue("NEGATIVE_LINEAR_VALUE", IssueSeverity.BLOCKING, f"第 {row_number} 行含线性尺度负值。", "请核实是否已取 log 或数据是否损坏"))
         self._raise_if_cancelled(cancelled)
@@ -257,11 +287,76 @@ class PreparationService:
         session: WizardSession,
         *,
         summary: ValidationSummary | None = None,
+        source_sha256: str | None = None,
+        cancelled: Callable[[], bool] | None = None,
     ) -> ExpressionMatrix:
-        summary = summary or self.validate(session)
+        final_dir = Path(session.project_dir)
+        existing_empty_dir = (
+            final_dir.exists()
+            and final_dir.is_dir()
+            and not final_dir.is_symlink()
+            and next(final_dir.iterdir(), None) is None
+        )
+        if final_dir.is_symlink() or (final_dir.exists() and not existing_empty_dir):
+            raise FileExistsError("目标项目文件夹已存在；为避免覆盖旧项目，请选择新文件夹。")
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging_dir = Path(tempfile.mkdtemp(prefix=".rnaseq-helper-preparing-", dir=final_dir.parent))
+        staged_session = replace(session, project_dir=staging_dir)
+        try:
+            matrix = self._finish_staged(
+                staged_session,
+                summary=summary,
+                source_sha256=source_sha256,
+                cancelled=cancelled,
+                final_project_dir=final_dir,
+            )
+            if final_dir.exists() or final_dir.is_symlink():
+                still_empty = (
+                    existing_empty_dir
+                    and final_dir.is_dir()
+                    and not final_dir.is_symlink()
+                    and next(final_dir.iterdir(), None) is None
+                )
+                if not still_empty:
+                    raise FileExistsError("目标项目文件夹在整理期间被创建或有内容；未覆盖该文件夹。")
+                final_dir.rmdir()
+            os.rename(staging_dir, final_dir)
+            return replace(
+                matrix,
+                values=replace(matrix.values, path=final_dir / "prepared" / "expression_matrix.tsv"),
+                feature_metadata=replace(matrix.feature_metadata, path=final_dir / "prepared" / "feature_metadata.tsv"),
+                sample_metadata=replace(matrix.sample_metadata, path=final_dir / "prepared" / "sample_metadata.tsv"),
+            )
+        except BaseException:
+            shutil.rmtree(staging_dir, ignore_errors=True)
+            raise
+
+    def _finish_staged(
+        self,
+        session: WizardSession,
+        *,
+        summary: ValidationSummary | None = None,
+        source_sha256: str | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        final_project_dir: Path,
+    ) -> ExpressionMatrix:
+        summary = summary or self.validate(session, cancelled=cancelled)
         if not summary.passed:
             raise PreparationBlocked(summary)
-        header, _, feature_ids, sample_ids, matrix, annotation_rows = self._materialize(session.recipe, session.raw_table)
+        source_path = session.asset.source_paths[0]
+        self._assert_session_source_unchanged(session)
+        source_sha256 = source_sha256 or self.fingerprint_source(
+            source_path,
+            cancelled=cancelled,
+            expected_signature=session.source_signature,
+        )
+        header, _, feature_ids, sample_ids, matrix, annotation_rows = self._materialize(
+            session.recipe,
+            session.raw_table,
+            cancelled=cancelled,
+        )
+        self._raise_if_cancelled(cancelled)
+        self._assert_session_source_unchanged(session)
         prepared = session.project_dir / "prepared"
         prepared.mkdir(parents=True, exist_ok=True)
         matrix_path = prepared / "expression_matrix.tsv"
@@ -285,11 +380,16 @@ class PreparationService:
         with matrix_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
             writer.writerow(["feature_key", *sample_ids])
-            writer.writerows([[feature_id, *values] for feature_id, values in zip(feature_ids, matrix)])
+            for index, (feature_id, values) in enumerate(zip(feature_ids, matrix)):
+                if index % 128 == 0:
+                    self._raise_if_cancelled(cancelled)
+                writer.writerow([feature_id, *values])
         with feature_path.open("w", encoding="utf-8", newline="") as handle:
             writer = csv.writer(handle, delimiter="\t", lineterminator="\n")
             writer.writerow(["feature_key", "original_id", *annotation_headers])
-            for feature_id, annotations in zip(feature_ids, annotation_rows):
+            for index, (feature_id, annotations) in enumerate(zip(feature_ids, annotation_rows)):
+                if index % 128 == 0:
+                    self._raise_if_cancelled(cancelled)
                 values = list(annotations)
                 if reference_result is not None and reference_result.mapping and not has_gene_symbol:
                     values.append(";".join(reference_result.mapping.get(feature_id, ())))
@@ -325,6 +425,8 @@ class PreparationService:
             sample_headers.extend(geo_extra)
             writer.writerow(sample_headers)
             for index, sample_id in enumerate(sample_ids):
+                if index % 128 == 0:
+                    self._raise_if_cancelled(cancelled)
                 row = [sample_id]
                 if geo_accessions:
                     row.append(geo_accessions[index])
@@ -335,11 +437,34 @@ class PreparationService:
                 row.extend(values[index] for values in geo_extra.values())
                 writer.writerow(row)
         recipe_payload = session.recipe.as_dict()
+        self._raise_if_cancelled(cancelled)
         recipe_path.write_text(json.dumps(recipe_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         recipe_id = __import__("hashlib").sha256(json.dumps(recipe_payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:16]
         matrix_id = str(uuid4())
         project_manifest = session.project_dir / "project.json"
-        source_path = session.asset.source_paths[0]
+        project_source_path = persisted_local_path(source_path)
+        source_is_project_relative = False
+        if session.asset.archive_member_paths:
+            # Keep the selected member with the project so relocation does not
+            # sever the provenance link. The original archive remains untouched.
+            relative_source = Path("source-input") / source_path.name
+            bundled_source = session.project_dir / relative_source
+            bundled_source.parent.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256()
+            with source_path.open("rb") as source_handle, bundled_source.open("wb") as target_handle:
+                while True:
+                    if cancelled and cancelled():
+                        raise PreparationCancelled("已取消保存来源文件")
+                    chunk = source_handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    target_handle.write(chunk)
+                    digest.update(chunk)
+            if digest.hexdigest() != source_sha256:
+                raise ValueError("压缩包内来源文件在整理期间发生变化；未保存不一致的项目。")
+            project_source_path = relative_source.as_posix()
+            source_is_project_relative = True
+        self._raise_if_cancelled(cancelled)
         source_modality = (
             "MICROARRAY"
             if session.geo_matrix is not None
@@ -347,24 +472,35 @@ class PreparationService:
             == {"expression profiling by array"}
             else None
         )
+        observation_unit_hint = str(session.asset.observation_unit_hint or "").strip().upper()
+        observation_unit = (
+            ObservationUnit.CELL
+            if observation_unit_hint == ObservationUnit.CELL.value
+            else ObservationUnit.BULK_SAMPLE
+            if observation_unit_hint == ObservationUnit.BULK_SAMPLE.value
+            else ObservationUnit.UNKNOWN
+        )
         project_manifest.write_text(json.dumps({
-            "project_id": persisted_local_path(session.project_dir.name),
-            "project_id_redacted": may_contain_sensitive_metadata(session.project_dir.name),
+            "project_id": persisted_local_path(final_project_dir.name),
+            "project_id_redacted": may_contain_sensitive_metadata(final_project_dir.name),
             "matrix_id": matrix_id,
             "source_asset_id": session.asset.asset_id,
-            "source_path": persisted_local_path(source_path),
-            "source_path_redacted": may_contain_sensitive_metadata(source_path),
+            "source_path": project_source_path,
+            "source_path_relative": source_is_project_relative,
+            "source_path_redacted": may_contain_sensitive_metadata(source_path) if not source_is_project_relative else False,
+            "source_sha256": source_sha256,
             "source_asset": session.asset.as_dict(),
-            "preparation_recipe": persisted_local_path(recipe_path),
+            "preparation_recipe": persisted_local_path(final_project_dir / "preparation-recipe.json"),
             "fact_confirmations": recipe_payload.get("fact_confirmations", []),
             "reported_transform": recipe_payload.get("reported_transform", ""),
             "matrix_content_hash": sha256_file(matrix_path),
-            "reference_result": persisted_local_path(session.project_dir / "references" / "reference-result.json") if reference_result is not None else None,
+            "reference_result": persisted_local_path(final_project_dir / "references" / "reference-result.json") if reference_result is not None else None,
             "platform_id": platform_id,
             "series_types": list(session.geo_matrix.series_types) if session.geo_matrix else [],
             "source_modality": source_modality,
+            "observation_unit": observation_unit.value,
             "feature_id_type": self._feature_id_type(feature_ids),
-            "sample_metadata": persisted_local_path(sample_path),
+            "sample_metadata": persisted_local_path(final_project_dir / "prepared" / "sample_metadata.tsv"),
             "validation": summary.as_dict(),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         if reference_result is not None:
@@ -401,7 +537,7 @@ class PreparationService:
             sha256_file(sample_path),
         )
         return ExpressionMatrix(
-            matrix_id, matrix_ref, feature_ref, sample_ref, ObservationUnit.BULK_SAMPLE,
+            matrix_id, matrix_ref, feature_ref, sample_ref, observation_unit,
             session.recipe.measurement_type, session.recipe.value_scale, session.recipe.input_transform,
             self._feature_id_type(feature_ids), session.recipe.species_taxid, (session.asset.asset_id,), recipe_id,
             summary, content_hash,
@@ -409,6 +545,61 @@ class PreparationService:
             platform_id=platform_id,
             source_modality=source_modality,
         )
+
+    @staticmethod
+    def fingerprint_source(
+        path: Path,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+        cancelled: Callable[[], bool] | None = None,
+        expected_signature: tuple[int, int, int, int] | None = None,
+    ) -> str:
+        """Hash the selected input with bounded progress and detect concurrent changes."""
+        path = Path(path)
+        before = path.stat()
+        before_signature = PreparationService._stat_signature(before)
+        if expected_signature is not None and before_signature != expected_signature:
+            raise ValueError("来源文件在导入后发生变化；未保存整理项目，请重新导入。")
+        total = before.st_size
+        digest = hashlib.sha256()
+        completed = 0
+        last_reported = 0
+        if progress is not None:
+            progress(0, total)
+        with path.open("rb") as handle:
+            while True:
+                PreparationService._raise_if_cancelled(cancelled)
+                block = handle.read(1024 * 1024)
+                if not block:
+                    break
+                digest.update(block)
+                completed += len(block)
+                if progress is not None and (completed - last_reported >= 8 * 1024 * 1024 or completed == total):
+                    progress(completed, total)
+                    last_reported = completed
+        PreparationService._raise_if_cancelled(cancelled)
+        after = path.stat()
+        if before_signature != PreparationService._stat_signature(after):
+            raise ValueError("来源文件在校验期间发生变化；未保存整理项目，请确认文件稳定后重试。")
+        if progress is not None and completed != last_reported:
+            progress(completed, total)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _source_signature(path: Path) -> tuple[int, int, int, int]:
+        return PreparationService._stat_signature(Path(path).stat())
+
+    @staticmethod
+    def _assert_session_source_unchanged(session: WizardSession) -> None:
+        if (
+            session.source_signature is not None
+            and PreparationService._source_signature(session.asset.source_paths[0]) != session.source_signature
+        ):
+            raise ValueError("来源文件在导入后发生变化；未保存整理项目，请重新导入。")
+
+    @staticmethod
+    def _stat_signature(info) -> tuple[int, int, int, int]:
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
     @staticmethod
     def _measurement_provenance(confirmations: tuple[Mapping[str, Any], ...]) -> str:
@@ -587,7 +778,11 @@ class PreparationService:
     @staticmethod
     def _is_number(value: str) -> bool:
         try:
-            return math.isfinite(float(value))
+            # Column-role detection must classify NaN/Inf as numeric tokens;
+            # validation then reports NONFINITE_VALUE instead of silently
+            # demoting that sample column to an annotation column.
+            float(value)
+            return True
         except ValueError:
             return False
 

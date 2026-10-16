@@ -76,6 +76,40 @@ cat(toJSON(out, auto_unbox = TRUE, digits = 17, na = "null"))
 '''
 
 
+DIRECT_LINEAR_FILTERED_LIMMA = r'''
+suppressPackageStartupMessages({ library(jsonlite); library(limma) })
+p <- fromJSON(commandArgs(trailingOnly = TRUE)[1], simplifyVector = FALSE)
+m <- do.call(rbind, p$matrix)
+storage.mode(m) <- "double"
+keep <- rowSums(m >= p$filter_threshold) >= p$min_samples
+analysis_matrix <- log2(m[keep, , drop = FALSE] + 1)
+groups <- factor(as.character(unlist(p$groups)), levels = c(p$control, p$test))
+design <- model.matrix(~ 0 + groups)
+colnames(design) <- c("control", "test")
+fit_model <- contrasts.fit(lmFit(analysis_matrix, design), makeContrasts(test - control, levels = design))
+scale <- pmax(1, rowMeans(analysis_matrix^2))
+degenerate_kept <- fit_model$sigma^2 <= 1e-12 * scale
+valid <- which(!degenerate_kept)
+ebayes_args <- list(fit = fit_model[valid, , drop = FALSE], trend = TRUE, robust = TRUE,
+                    winsor.tail.p = c(0.05, 0.10), proportion = 0.01,
+                    stdev.coef.lim = c(0.1, 4))
+if ("legacy" %in% names(formals(eBayes))) ebayes_args$legacy <- TRUE
+ebayes_fit <- do.call(eBayes, ebayes_args)
+coefficient <- rep(NA_real_, nrow(m))
+pvalue <- rep(NA_real_, nrow(m))
+padj <- rep(NA_real_, nrow(m))
+coefficient[keep] <- as.numeric(fit_model$coefficients[, 1])
+kept_indices <- which(keep)
+valid_indices <- kept_indices[valid]
+pvalue[valid_indices] <- as.numeric(ebayes_fit$p.value[, 1])
+padj[valid_indices] <- p.adjust(pvalue[valid_indices], method = "BH")
+degenerate <- rep(FALSE, nrow(m))
+degenerate[kept_indices] <- degenerate_kept
+cat(toJSON(list(keep = keep, coefficient = coefficient, pvalue = pvalue, padj = padj,
+                degenerate = degenerate), auto_unbox = FALSE, digits = 17, na = "null"))
+'''
+
+
 def _rscript() -> str:
     path = shutil.which("Rscript")
     if not path:
@@ -203,8 +237,67 @@ def test_formal_limma_uses_actual_paired_batch_design_and_plot_subset() -> None:
     assert actual["diagnostics"]["residual_df"] == expected["residual_df"]
     assert actual["diagnostics"]["residual_df"][0] == 3
     assert actual["diagnostics"]["degenerate_count"] == 2
+    assert len(actual["table"]) == len(expected["coefficient"])
+    for index, row in enumerate(actual["table"]):
+        _assert_close(row["log2FoldChange"], expected["coefficient"][index])
+        _assert_close(row["pvalue"], expected["pvalue"][index])
+        _assert_close(row["padj"], expected["padj"][index])
+        assert row["tested"] is (not expected["degenerate"][index])
     plot = actual["plot_matrix"]
     assert plot["feature_ids"] == payload["feature_ids"]
     assert plot["sample_ids"] == payload["sample_ids"]
     assert plot["transform"] == "already_log2"
     assert plot["values"] == payload["matrix"]
+
+
+def test_formal_linear_limma_matches_independent_filter_transform_and_bh_baseline() -> None:
+    rscript = _rscript()
+    if not _has_package(rscript, "limma") or not _has_package(rscript, "jsonlite"):
+        pytest.skip("limma/jsonlite 未安装")
+    sample_ids = ["C1", "C2", "C3", "T1", "T2", "T3"]
+    matrix = []
+    feature_ids = []
+    for index in range(12):
+        base = 4.0 + index * 2
+        matrix.append([base, base + 2, base - 1, base + 3, base + 5, base + 1])
+        feature_ids.append(f"stable_{index:02d}")
+    matrix.extend([
+        [1, 0, 1, 1, 0, 0],  # exactly min_samples cells meet the inclusive threshold
+        [1, 0, 0, 0, 0, 0],  # below the filter threshold in sample count
+        [1, 1, 1, 1, 1, 1],  # retained by filtering, then excluded as degenerate
+    ])
+    feature_ids.extend(["boundary", "filtered", "all_zero"])
+    payload = {
+        "matrix": matrix,
+        "feature_ids": feature_ids,
+        "sample_ids": sample_ids,
+        "groups": ["control"] * 3 + ["treated"] * 3,
+        "control": "control",
+        "test": "treated",
+        "fdr_threshold": 0.05,
+        "lfc_threshold": 1.0,
+        "measurement_type": "TPM",
+        "transform": "log2(x+1)",
+        "method": "LIMMA_ON_LOG2_TPM",
+        "filter_threshold": 1.0,
+        "min_samples": 3,
+        "gene_symbols": [None] * len(feature_ids),
+    }
+    expected = _direct(rscript, DIRECT_LINEAR_FILTERED_LIMMA, payload)
+    actual = RBridgeClient(rscript=rscript).run(
+        "analyze_limma", payload, JobContext(Path.cwd()), "normalized-log-limma-trend-v1",
+    ).result["table"]
+
+    assert [row["feature_key"] for row in actual] == feature_ids
+    assert expected["keep"][-3:] == [True, False, True]
+    assert expected["degenerate"][-1] is True
+    for index, row in enumerate(actual):
+        _assert_close(row["log2FoldChange"], expected["coefficient"][index])
+        _assert_close(row["pvalue"], expected["pvalue"][index])
+        _assert_close(row["padj"], expected["padj"][index])
+        assert row["tested"] is (expected["keep"][index] and not expected["degenerate"][index])
+    assert actual[-3]["tested"] is True
+    assert actual[-2]["reason_not_tested"] == "below_expression_filter"
+    assert actual[-2]["log2FoldChange"] is None
+    assert actual[-1]["reason_not_tested"] == "degenerate_residual_variance"
+    assert actual[-1]["pvalue"] is None and actual[-1]["padj"] is None

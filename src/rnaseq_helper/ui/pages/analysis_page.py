@@ -36,6 +36,7 @@ class AnalysisPage(QWidget):
         self.matrix: ExpressionMatrix | None = None
         self._metadata_columns: list[str] = []
         self.plan: AnalysisPlan | None = None
+        self._restored_project = False
         self._jobs: list[tuple[QThread, AnalysisWorker, JobContext]] = []
         self._build_ui()
 
@@ -66,6 +67,28 @@ class AnalysisPage(QWidget):
         design_hint.setWordWrap(True)
         design_hint.setStyleSheet("color: #3b4752; padding-bottom: 4px;")
         grouping_layout.addWidget(design_hint)
+        replicate_row = QHBoxLayout()
+        replicate_row.setContentsMargins(8, 2, 8, 4)
+        replicate_row.setSpacing(10)
+        replicate_row.addWidget(QLabel("样本之间的关系（必选）"))
+        self.replicate_structure = QComboBox()
+        self.replicate_structure.addItem("请选择：先核对实验记录", None)
+        self.replicate_structure.addItem(
+            "每列是一个整体生物样本（不是单个细胞），且样本彼此独立",
+            "independent",
+        )
+        self.replicate_structure.addItem("同一个体有多列（配对/重复测量）", "paired")
+        self.replicate_structure.addItem("每列是单个细胞/细胞核（当前不支持）", "cell")
+        self.replicate_structure.addItem("技术重复、混合样本或不确定", "unknown")
+        self.replicate_structure.setMinimumWidth(360)
+        self.replicate_structure.setToolTip(
+            "只有每列代表一个整体生物样本、且样本彼此独立时才选第一项。"
+            "单个细胞/细胞核不能当作 bulk 生物学重复；单细胞数据应先按供者汇总为 pseudobulk。"
+            "同一个人/动物的多个样本选配对；技术重复、混合样本或不确定时不要选独立。"
+        )
+        self.replicate_structure.currentIndexChanged.connect(self._invalidate_plan)
+        replicate_row.addWidget(self.replicate_structure, 1)
+        grouping_layout.addLayout(replicate_row)
         filter_row = QHBoxLayout()
         filter_row.setContentsMargins(8, 4, 8, 4)
         filter_row.setSpacing(10)
@@ -156,9 +179,27 @@ class AnalysisPage(QWidget):
         layout.addWidget(status_box)
 
     @Slot(object)
-    def set_matrix(self, matrix: ExpressionMatrix) -> None:
+    def set_matrix(
+        self,
+        matrix: ExpressionMatrix,
+        initial_design: dict[str, object] | None = None,
+        restored_project: bool = False,
+    ) -> None:
         self.matrix = matrix
         self.plan = None
+        self._restored_project = restored_project
+        saved_structure = None
+        if initial_design:
+            candidate = initial_design.get("replicate_structure")
+            expected_type = "paired" if candidate == "paired" else "independent_two_group"
+            if (
+                candidate in {"independent", "paired"}
+                and initial_design.get("replicate_structure_confirmed") is True
+                and initial_design.get("type") == expected_type
+            ):
+                saved_structure = candidate
+        structure_index = self.replicate_structure.findData(saved_structure)
+        self.replicate_structure.setCurrentIndex(structure_index if structure_index >= 0 else 0)
         sample_ids = self._read_sample_ids(matrix)
         sample_metadata = self._read_sample_metadata(matrix)
         available_metadata = sorted({
@@ -196,13 +237,20 @@ class AnalysisPage(QWidget):
             combo.addItem("test（处理）", "test")
             combo.setFixedHeight(30)
             combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            assignments = initial_design.get("assignments", {}) if initial_design else {}
+            saved_group = assignments.get(sample_id) if isinstance(assignments, dict) else None
             suggested = suggestion.assignments.get(sample_id)
-            if suggested in {"control", "test"}:
-                combo.setCurrentIndex(1 if suggested == "control" else 2)
+            selected_group = saved_group if saved_group in {"control", "test", "excluded"} else (
+                "excluded" if restored_project else suggested
+            )
+            if selected_group in {"control", "test", "excluded"}:
+                combo.setCurrentIndex(combo.findData(selected_group))
             combo.currentIndexChanged.connect(self._invalidate_plan)
             self.sample_table.setCellWidget(row, 1, combo)
-            self.sample_table.setItem(row, 2, QTableWidgetItem(""))
-            self.sample_table.setItem(row, 3, QTableWidgetItem(""))
+            for column, key in ((2, "paired_subjects"), (3, "batch")):
+                mapping = initial_design.get(key, {}) if initial_design else {}
+                value = mapping.get(sample_id, "") if isinstance(mapping, dict) else ""
+                self.sample_table.setItem(row, column, QTableWidgetItem(str(value)))
             metadata = sample_metadata.get(sample_id, {})
             for column, key in ((4, "geo_accession"), (5, "sample_title"), (6, "platform_id")):
                 value = metadata.get(key, "") or "—"
@@ -229,6 +277,11 @@ class AnalysisPage(QWidget):
         self.matrix_label.setText(
             f"已整理矩阵：{matrix.values.shape[0]} 个特征 × {matrix.values.shape[1]} 个样本；请确认下方分组。"
         )
+        if restored_project:
+            self.matrix_label.setText(
+                self.matrix_label.text()
+                + "\n这是已打开的项目；点击“开始分析”将覆盖此项目中的分析计划、结果、图表和报告（不会覆盖原始输入文件）。"
+            )
         self.plan_button.setEnabled(bool(sample_ids))
         self.run_button.setEnabled(False)
         self._update_group_summary()
@@ -256,15 +309,21 @@ class AnalysisPage(QWidget):
             DEGConfig("control", "test"),
             paired_subjects=paired_subjects or None,
             batch=batch or None,
+            replicate_structure=self.replicate_structure.currentData(),
         )
         project_dir = self.matrix.values.path.parent.parent
-        PlanningService.save(self.plan, project_dir)
+        if not self._restored_project:
+            PlanningService.save(self.plan, project_dir)
         if self.plan.runnable:
             limits = "\n".join(f"• {item}" for item in self.plan.limitations_zh) or "• 无额外限制"
             self.plan_label.setText(
                 f"方法：{self.plan.method}\n{self.plan.method_reason_zh}\n"
                 f"Profile：{self.plan.method_profile_id}\n{limits}\n"
-                f"计划摘要已保存：{project_dir / 'analysis-plan.json'}"
+                + (
+                    "新计划将在分析成功后与结果一起保存。"
+                    if self._restored_project
+                    else f"计划摘要已保存：{project_dir / 'analysis-plan.json'}"
+                )
             )
             self.run_button.setEnabled(True)
             self.status_label.setText("计划已生成。请确认方法说明后点击“开始分析”。")

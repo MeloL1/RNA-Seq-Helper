@@ -71,6 +71,10 @@ class RBridgeTests(unittest.TestCase):
     result = RBridgeClient(rscript=rscript).run("analyze_deseq2", payload, JobContext(Path.cwd()), "deseq2-count-v1")
     self.assertEqual(result.result["method"], "DESEQ2")
     self.assertEqual(result.result["parameters"]["dispersion_estimation"], "gene-wise-fallback")
+    self.assertEqual(result.result["parameters"]["dispersion_fit_type"], "gene-wise")
+    self.assertEqual(result.result["parameters"]["size_factor_type"], "ratio")
+    self.assertEqual(result.result["parameters"]["test"], "Wald")
+    self.assertEqual(result.result["parameters"]["p_adjust_method"], "BH")
     self.assertEqual(result.result["issues"][0]["code"], "DESEQ2_GENEWISE_DISPERSION_FALLBACK")
 
   def test_submit_accepts_explicit_request(self):

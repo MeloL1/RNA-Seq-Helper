@@ -21,6 +21,7 @@ from rnaseq_helper.domain.models import (
     ObservationUnit,
     ReferenceRequest,
     ValueScale,
+    sha256_file,
 )
 from rnaseq_helper.grouping.service import GroupingService
 
@@ -46,6 +47,7 @@ class PlanningService:
         config: DEGConfig | None = None,
         paired_subjects: Mapping[str, str] | None = None,
         batch: Mapping[str, str] | None = None,
+        replicate_structure: str | None = None,
     ) -> AnalysisPlan:
         sample_ids = self._read_sample_ids(matrix)
         # 只有两组比较实际使用的样本才进入设计；缺失、空值、未确认和
@@ -58,8 +60,41 @@ class PlanningService:
             paired_subjects=paired_subjects,
             batch=batch,
         )
-        blockers = list(grouping.issues)
+        blockers = [
+            issue for issue in grouping.issues
+            if issue.severity == IssueSeverity.BLOCKING
+        ]
         blockers.extend(self._design_gate_issues(active_sample_ids, assignments, paired_subjects, batch))
+        normalized_structure = str(replicate_structure or "").strip().lower()
+        if normalized_structure not in {"independent", "paired", "cell"}:
+            normalized_structure = "unknown"
+            blockers.append(Issue(
+                "UNKNOWN_REPLICATE_STRUCTURE",
+                IssueSeverity.BLOCKING,
+                "尚未确认每列样本之间是否相互独立；软件不能把未填写配对编号自动解释成独立样本。",
+                "请按实验记录选择独立生物样本、同一对象重复测量，或先核对单细胞/技术重复信息。",
+            ))
+        if normalized_structure == "paired" and not paired_subjects:
+            blockers.append(Issue(
+                "PAIR_IDS_REQUIRED",
+                IssueSeverity.BLOCKING,
+                "已选择同一对象的配对/重复测量设计，但没有填写配对个体编号。",
+                "为每个纳入样本填写对应的人/动物编号，并确保每个个体同时有两组样本。",
+            ))
+        if normalized_structure == "independent" and paired_subjects:
+            blockers.append(Issue(
+                "REPLICATE_STRUCTURE_CONFLICT",
+                IssueSeverity.BLOCKING,
+                "已确认独立样本设计，但配对个体列仍有填写。",
+                "请清空配对个体列，或将设计改为配对/重复测量并核对编号。",
+            ))
+        if normalized_structure == "cell":
+            blockers.append(Issue(
+                "CELL_NOT_BULK",
+                IssueSeverity.BLOCKING,
+                "已确认每列是单个细胞/细胞核；当前版本不能把细胞作为独立生物学样本进行两组分析。",
+                "请提供供者级 pseudobulk 矩阵，或暂缓本版本分析。",
+            ))
         if matrix.observation_unit == ObservationUnit.CELL:
             blockers.append(Issue(
                 "CELL_NOT_BULK",
@@ -74,6 +109,13 @@ class PlanningService:
                 "来源元数据标注为芯片阵列，当前数值类型却选择了 raw count、TPM、FPKM、RPKM 或 CPM。",
                 "返回导入整理，将芯片表达值标为“其他连续表达值”；尺度仍须按来源说明确认。",
             ))
+        elif matrix.source_modality == "MICROARRAY" and matrix.value_scale != ValueScale.LOG2:
+            blockers.append(Issue(
+                "MICROARRAY_REQUIRES_LOG2",
+                IssueSeverity.BLOCKING,
+                "芯片信号只有在来源说明确认已经转换为 log2 表达值后，才能进入当前差异分析；线性信号不能自动取 log2(x+1) 代替来源转换。",
+                "请核对与当前矩阵对应的处理说明；若不能确认 log2 尺度，请暂不分析。",
+            ))
         if not matrix.validation.passed:
             blockers.extend(matrix.validation.blockers)
         method, reason, preprocessing, limitations = self._method_for(matrix, grouping, config)
@@ -84,16 +126,44 @@ class PlanningService:
                 reason,
                 "请确认单位、尺度和数据来源，或提供适合本版本的表达矩阵",
             ))
+        if method == "DESEQ2" and active_sample_ids and not self._has_ratio_size_factor_reference(
+            matrix,
+            active_sample_ids,
+        ):
+            blockers.append(Issue(
+                "DESEQ2_RATIO_SIZE_FACTORS_UNAVAILABLE",
+                IssueSeverity.BLOCKING,
+                "当前 DESeq2 固定的 ratio 归一化无法估计：没有任何一个特征在所有纳入样本中都具有正 count。",
+                "请核实输入矩阵和样本纳入；本版本不会自动切换到另一种 size-factor 方法。",
+            ))
         selected_config = config or DEGConfig(control or "control", test or "test")
         if control and test and (selected_config.control_group != control or selected_config.test_group != test):
             selected_config = replace(selected_config, control_group=control, test_group=test)
         group_counts = {
-            group: sum(value == group for value in assignments.values())
+            group: sum(assignments.get(sample) == group for sample in active_sample_ids)
             for group in (control, test) if group
         }
         min_group_n = min(group_counts.values()) if group_counts else 0
+        if paired_subjects and control and test:
+            paired_groups: dict[str, set[str]] = {}
+            paired_sample_counts: dict[str, int] = {}
+            for sample in active_sample_ids:
+                subject = str(paired_subjects.get(sample, "")).strip()
+                group = assignments.get(sample)
+                if subject and group in {control, test}:
+                    paired_groups.setdefault(subject, set()).add(str(group))
+                    paired_sample_counts[subject] = paired_sample_counts.get(subject, 0) + 1
+            min_group_n = sum(
+                paired_sample_counts[subject] == 2 and groups == {control, test}
+                for subject, groups in paired_groups.items()
+            )
         if self._is_normalized_limma(method) and matrix.value_scale == ValueScale.LINEAR:
             preprocessing["min_samples"] = min_group_n
+            filter_reason = (
+                "至少 N 个所选样本达到线性表达量 x≥1；N 为完整配对数。"
+                if paired_subjects else
+                "至少 N 个所选样本达到线性表达量 x≥1；N 为较小组样本数。"
+            )
             if selected_config.expression_filter is None:
                 selected_config = replace(
                     selected_config,
@@ -102,7 +172,7 @@ class PlanningService:
                         threshold=1.0,
                         unit=matrix.measurement_type.value,
                         min_samples=min_group_n,
-                        reason_zh="至少 N 个所选样本达到线性表达量 x≥1；N 为较小组样本数。",
+                        reason_zh=filter_reason,
                     ),
                 )
         normalized_warnings: list[str] = []
@@ -127,7 +197,11 @@ class PlanningService:
             normalized_warnings.extend(self._precision_warning_messages(precision))
             blockers.extend(self._precision_gate_issues(precision))
         design = {
-            "type": "paired" if paired_subjects else "independent_two_group",
+            "type": "paired" if normalized_structure == "paired" else (
+                "independent_two_group" if normalized_structure == "independent" else "unconfirmed"
+            ),
+            "replicate_structure": normalized_structure,
+            "replicate_structure_confirmed": normalized_structure in {"independent", "paired", "cell"},
             "assignments": dict(assignments),
             "paired_subjects": dict(paired_subjects or {}),
             "batch": dict(batch or {}),
@@ -149,6 +223,23 @@ class PlanningService:
                 "proportion": 0.01,
                 "stdev.coef.lim": [0.1, 4],
                 "legacy_requested": True,
+            })
+        elif method == "DESEQ2":
+            # 固定并记录当前 count profile 实际依赖的 DESeq2 默认策略；
+            # 数值与当前 v1 profile 一致，只是避免升级后默认值无声漂移。
+            parameters.update({
+                "test": "Wald",
+                "size_factor_type": "ratio",
+                "dispersion_fit_type": "parametric",
+                "beta_prior": False,
+                "min_replicates_for_replace": 7,
+                "use_t": False,
+                "min_mu": 0.5,
+                "parallel": False,
+                "cooks_cutoff": True,
+                "independent_filtering": True,
+                "independent_filter_statistic": "baseMean",
+                "p_adjust_method": "BH",
             })
         if selected_config.expression_filter:
             parameters["expression_filter"] = selected_config.expression_filter.as_dict()
@@ -180,6 +271,7 @@ class PlanningService:
             ),
             reference_required_for_fit=False,
             source_modality=matrix.source_modality,
+            feature_metadata_hash=sha256_file(matrix.feature_metadata.path),
         )
         digest_payload = plan.as_dict()
         digest_payload["confirmation_digest"] = ""
@@ -236,6 +328,13 @@ class PlanningService:
             return (
                 "BLOCKED",
                 "来源元数据表明输入来自芯片阵列，与当前所选数值类型冲突。",
+                {},
+                (),
+            )
+        if matrix.source_modality == "MICROARRAY" and matrix.value_scale != ValueScale.LOG2:
+            return (
+                "BLOCKED",
+                "芯片信号须由来源说明确认已是 log2 表达值；不能把线性 SIGNAL 自动转换后视为同一处理结果。",
                 {},
                 (),
             )
@@ -329,7 +428,8 @@ class PlanningService:
             threshold = float(preprocessing.get("filter_threshold", 1.0))
             min_samples = int(preprocessing.get("min_samples", 0))
             keep = np.sum(values >= threshold, axis=1) >= min_samples
-            model_values = np.log2(values[keep] + 1.0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                model_values = np.log2(values[keep] + 1.0)
         else:
             keep = np.ones(values.shape[0], dtype=bool)
             model_values = values
@@ -339,6 +439,13 @@ class PlanningService:
         nonconstant = finite & (np.ptp(model_values, axis=1) > 1e-12)
         fitting_values = model_values[nonconstant]
         issues: list[Issue] = []
+        if preprocessing.get("transform") == "log2(x+1)" and not np.all(np.isfinite(model_values)):
+            issues.append(Issue(
+                "NONFINITE_LOG_TRANSFORM",
+                IssueSeverity.BLOCKING,
+                "通过表达量过滤的特征中存在无法执行 log2(x+1) 的数值；若继续，统计任务会在转换阶段失败。",
+                "核对原始数值和单位，修正输入或选择与来源说明相符的数据尺度。",
+            ))
         if fitting_values.shape[0] < 500:
             issues.append(Issue(
                 "INSUFFICIENT_TREND_DATA",
@@ -431,9 +538,11 @@ class PlanningService:
                 str(metadata.get(sample)) for sample in sample_ids
                 if metadata.get(sample) is not None
             ))
+            # The R worker builds full group indicators, then appends
+            # treatment-coded nuisance terms with the first level omitted.
             columns.extend([
                 [1.0 if str(metadata.get(sample)) == level else 0.0 for sample in sample_ids]
-                for level in levels
+                for level in levels[1:]
             ])
         design = np.asarray(columns, dtype=float).T if columns else np.empty((len(sample_ids), 0))
         rank = int(np.linalg.matrix_rank(design)) if design.size else 0
@@ -461,6 +570,32 @@ class PlanningService:
         design, rank, residual_df = PlanningService._design_matrix(
             sample_ids, assignments, paired_subjects, batch,
         )
+        if rank < design.shape[1]:
+            return [Issue(
+                "NON_ESTIMABLE",
+                IssueSeverity.BLOCKING,
+                "配对个体与批次等协变量之间存在重复信息，R 无法拟合当前设计矩阵。",
+                "请核对配对/批次记录；如果两个字段实际表示同一因素，只保留正确的一个。",
+            )]
+        group_levels = tuple(dict.fromkeys(
+            str(assignments.get(sample)) for sample in sample_ids
+            if assignments.get(sample) in PlanningService.ACTIVE_GROUPS
+        ))
+        contrast = np.zeros(design.shape[1], dtype=float)
+        contrast[group_levels.index("test")] = 1.0
+        contrast[group_levels.index("control")] = -1.0
+        # Residual df alone is insufficient: nuisance covariates can absorb
+        # the target group contrast while leaving residual df for within-group
+        # noise. A contrast is estimable only when it lies in row(X).
+        coefficient_projection = np.linalg.pinv(design) @ design
+        non_estimable = contrast - coefficient_projection @ contrast
+        if np.linalg.norm(non_estimable) > 1e-8 * max(1.0, np.linalg.norm(contrast)):
+            return [Issue(
+                "NON_ESTIMABLE",
+                IssueSeverity.BLOCKING,
+                "配对个体与批次等协变量组合后，目标组间比较无法单独估计。",
+                "请核对配对/批次信息；若这些因素与组别无法区分，请补充可比较的样本或暂停分析",
+            )]
         if residual_df < 2:
             return [Issue(
                 "NON_ESTIMABLE",
@@ -469,6 +604,29 @@ class PlanningService:
                 "请增加独立样本，或移除与分组完全重合的协变量",
             )]
         return []
+
+    @staticmethod
+    def _has_ratio_size_factor_reference(
+        matrix: ExpressionMatrix,
+        sample_ids: tuple[str, ...],
+    ) -> bool:
+        """The fixed DESeq2 ratio estimator needs a positive value in every sample."""
+        with matrix.values.path.open(encoding="utf-8", newline="") as handle:
+            reader = csv.reader(handle, delimiter="\t")
+            header = next(reader, [])
+            column_index = {sample_id: index for index, sample_id in enumerate(header)}
+            if any(sample_id not in column_index for sample_id in sample_ids):
+                return False
+            selected = [column_index[sample_id] for sample_id in sample_ids]
+            for row in reader:
+                if not row or max(selected, default=-1) >= len(row):
+                    continue
+                try:
+                    if all(float(row[index]) > 0 for index in selected):
+                        return True
+                except (TypeError, ValueError):
+                    continue
+        return False
 
     @staticmethod
     def _normalized_precision_diagnostics(

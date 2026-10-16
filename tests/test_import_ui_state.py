@@ -11,8 +11,10 @@ from PySide6.QtCore import QEventLoop, QPoint, Qt, QTimer
 
 from rnaseq_helper.domain.models import DataAsset, Evidence, ExpressionMatrix
 from rnaseq_helper.readers.geo_reader import GeoSeriesMatrixReader
+from rnaseq_helper.recognition.scanner import AssetScanner
 from rnaseq_helper.ui.pages.analysis_page import AnalysisPage
 from rnaseq_helper.ui.pages.import_page import ArchiveCandidateDialog, GeoWizardDialog, ImportPage, TenXWizardDialog
+from rnaseq_helper.ui.workers.import_worker import ImportProgress
 from tests.fixtures.mock_factory import write_tenx_bundle
 
 
@@ -37,6 +39,37 @@ def wait_until(predicate, timeout_ms: int = 10000) -> bool:
     return predicate()
 
 
+def test_source_hash_progress_is_visible_and_cancellable(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    page = ImportPage(project_root=tmp_path / "projects")
+
+    page._on_import_progress(
+        page._task_generation,
+        ImportProgress("正在校验来源文件", 128, 256, "expression.tsv", unit="字节"),
+    )
+
+    assert "正在校验来源文件 128/256 字节：expression.tsv" in page.status_label.text()
+    assert not page.cancel_button.isHidden()
+    assert page.cancel_button.isEnabled()
+    page.close()
+    application.processEvents()
+
+
+def test_saving_prepared_matrix_progress_keeps_cancel_available(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    page = ImportPage(project_root=tmp_path / "projects")
+
+    page._on_import_progress(
+        page._task_generation,
+        ImportProgress("正在保存整理后的表达表；此阶段也可取消", cancellable=True),
+    )
+
+    assert "此阶段也可取消" in page.status_label.text()
+    assert page.cancel_button.isEnabled()
+    page.close()
+    application.processEvents()
+
+
 def test_orientation_change_rederives_valid_columns(tmp_path: Path) -> None:
     application = QApplication.instance() or QApplication([])
     source = tmp_path / "matrix.tsv"
@@ -58,6 +91,77 @@ def test_orientation_change_rederives_valid_columns(tmp_path: Path) -> None:
     assert page.session.recipe.feature_id_column < width
     assert all(column < width for column in page.session.recipe.sample_columns)
     page.close()
+
+
+def test_geo_processing_context_is_shown_without_guessing_measurement_or_scale(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    source = tmp_path / "GSE999_processing_series_matrix.txt"
+    source.write_text(
+        '!Series_type\t"Expression profiling by array"\n'
+        '!Series_data_processing\t"Normalized to the 75th percentile; baseline transformed using the global median."\n'
+        '!Sample_geo_accession\t"GSM1"\t"GSM2"\n'
+        '!Sample_data_processing\t"GCRMA"\t"GCRMA"\n'
+        "!series_matrix_table_begin\nID_REF\tGSM1\tGSM2\nprobe_1\t1\t2\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+    asset = AssetScanner().scan((source,)).assets[0]
+    page = ImportPage(project_root=tmp_path / "projects")
+    try:
+        page._apply_auto_judgement(asset)
+
+        guidance = page.auto_judgement.text()
+        assert "75th percentile" in guidance
+        assert "global median" in guidance
+        assert "适用于全部 2 个 GEO 样本" in guidance
+        assert page.measurement_combo.currentData() == "UNKNOWN"
+        assert page.scale_combo.currentData() == "UNKNOWN"
+    finally:
+        page.close()
+        application.processEvents()
+
+
+def test_geo_processing_sensitive_text_is_hidden_in_beginner_guidance(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    source = tmp_path / "GSE999_sensitive_processing_series_matrix.txt"
+    source.write_text(
+        '!Series_data_processing\t"Processing performed for patient 17"\n'
+        "!series_matrix_table_begin\nID_REF\tGSM1\nprobe_1\t1\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+    asset = AssetScanner().scan((source,)).assets[0]
+    page = ImportPage(project_root=tmp_path / "projects")
+    try:
+        page._apply_auto_judgement(asset)
+
+        guidance = page.auto_judgement.text()
+        assert "patient 17" not in guidance
+        assert "已隐藏整句" in guidance
+        assert page.measurement_combo.currentData() == "UNKNOWN"
+        assert page.scale_combo.currentData() == "UNKNOWN"
+    finally:
+        page.close()
+        application.processEvents()
+
+
+def test_sensitive_filename_is_hidden_for_geo_processing_evidence(tmp_path: Path) -> None:
+    application = QApplication.instance() or QApplication([])
+    source = tmp_path / "patient_17_series_matrix.txt"
+    source.write_text(
+        '!Series_data_processing\t"Normalized by the global median"\n'
+        "!series_matrix_table_begin\nID_REF\tGSM1\nprobe_1\t1\n!series_matrix_table_end\n",
+        encoding="utf-8",
+    )
+    asset = AssetScanner().scan((source,)).assets[0]
+    page = ImportPage(project_root=tmp_path / "projects")
+    try:
+        page._apply_auto_judgement(asset)
+        guidance = page.auto_judgement.text()
+        assert "patient_17" not in guidance
+        assert "疑似个人或样本标识的文件名已隐藏" in guidance
+        assert "global median" in guidance
+    finally:
+        page.close()
+        application.processEvents()
     application.processEvents()
 
 

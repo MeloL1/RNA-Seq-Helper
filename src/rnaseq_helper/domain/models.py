@@ -325,6 +325,7 @@ class AnalysisPlan:
     reference_request: ReferenceRequest | None = None
     reference_required_for_fit: bool = False
     source_modality: str | None = None
+    feature_metadata_hash: str | None = None
 
     @property
     def runnable(self) -> bool:
@@ -338,6 +339,7 @@ class AnalysisPlan:
             "method_reason_zh": self.method_reason_zh,
             "analysis_basis": self.analysis_basis,
             "source_modality": self.source_modality,
+            "feature_metadata_hash": self.feature_metadata_hash,
             "method_profile_id": self.method_profile_id,
             "resolved_method_parameters": dict(self.resolved_method_parameters),
             "design": dict(self.design),
