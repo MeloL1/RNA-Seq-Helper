@@ -173,6 +173,7 @@ def test_geo_metadata_is_preserved_in_prepared_project(tmp_path: Path) -> None:
         "!Sample_title = treatment replicate 1\n"
         "!Sample_platform_id = GPL111\n"
         "!Sample_platform_id = GPL111\n"
+        '!Sample_data_processing\t"GCRMA"\t"GCRMA"\n'
         "!series_matrix_table_begin\n"
         "ID_REF\tGSM1\tGSM2\n"
         "probe1\t1.0\t2.0\n"
@@ -189,7 +190,11 @@ def test_geo_metadata_is_preserved_in_prepared_project(tmp_path: Path) -> None:
     session = service.apply(session, {"measurement_type": MeasurementType.TPM, "value_scale": ValueScale.LOG2})
     matrix = service.finish(session)
     sample_metadata = (tmp_path / "project" / "prepared" / "sample_metadata.tsv").read_text(encoding="utf-8")
-    assert "geo_accession\tsample_title\tplatform_id" in sample_metadata.splitlines()[0]
+    assert sample_metadata.splitlines()[0] == (
+        "sample_id\tgeo_accession\tsample_title\tplatform_id\tdata_processing"
+    )
+    assert matrix.sample_metadata.shape == (2, 5)
     assert "GSM1\tcontrol replicate 1" in sample_metadata
+    assert "GCRMA" in sample_metadata
     assert "GPL111" in sample_metadata
     assert matrix.platform_id == "GPL111"

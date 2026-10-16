@@ -533,7 +533,7 @@ class PreparationService:
             sample_path,
             "table-tsv",
             "string",
-            (summary.sample_count, 1 + int(bool(geo_accessions)) + int(bool(geo_titles)) + int(bool(platform_id))),
+            (summary.sample_count, len(sample_headers)),
             sha256_file(sample_path),
         )
         return ExpressionMatrix(

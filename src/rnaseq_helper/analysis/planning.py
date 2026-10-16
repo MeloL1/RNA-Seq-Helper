@@ -497,15 +497,50 @@ class PlanningService:
                 "这些值是评分或校正残差，不能沿用表达量的差异分析和倍数解释。",
                 "请提供原表达矩阵",
             )]
-        # 当前 runner 对通用入口按 already_log2 直接拟合；仅有明确 log2
-        # 证据才可进入，ln/log 等其他底数不能被标签自动当作 log2。
+        negative_log2_tokens = (
+            "not log2", "not log_2", "no log2", "without log2", "non-log2", "non log2",
+            "log2 not applied", "not logged", "unlogged", "untransformed",
+            "未取log2", "未取 log2", "没有取log2", "没有取 log2",
+            "未进行log2", "未进行 log2", "未做log2", "未做 log2",
+            "未经log2", "未经 log2", "未经过log2", "未经过 log2",
+            "尚未取log2", "尚未取 log2", "非log2", "非 log2",
+        )
+        other_log_base_tokens = (
+            "log10", "log_10", "log base 10", "ln(", "natural log", "natural logarithm",
+        )
+        ambiguous_log2_tokens = (
+            "possibly log2", "maybe log2", "uncertain log2", "log2 unknown",
+            "log2 unconfirmed", "scale unconfirmed", "not yet applied", "not applied",
+            "not used", "not performed", "not transformed", "unapplied", "unconfirmed",
+            "可能log2", "可能 log2", "也许log2", "也许 log2",
+            "log2未确认", "尺度未确认", "未应用", "没有应用", "尚未应用",
+            "未执行", "尚未执行", "未转换", "没有转换", "尚未转换",
+            "未确认", "尚未确认", "尚不确定",
+        )
+        if any(token in combined for token in (
+            *negative_log2_tokens, *other_log_base_tokens, *ambiguous_log2_tokens,
+        )):
+            return [Issue(
+                "INVALID_TRANSFORM",
+                IssueSeverity.BLOCKING,
+                "转换说明否认 log2、出现其他对数底数，或与 log2 确认相冲突；不能按通用 log2 表达量分析。",
+                "请核对当前矩阵实际采用的转换公式；无法确认时不要继续分析。",
+            )]
+        # 当前 runner 对通用入口按 already_log2 直接拟合；只接受明确的
+        # 转换公式/规范标签，或用户明确确认的 LOG2 尺度。仅仅提到 log2
+        # （例如“可能是 log2”或“需要 log2”）不构成输入已经取 log 的证据。
         confirmed_scale = (
             matrix.value_scale == ValueScale.LOG2
             and "user-confirmed value_scale=log2" in provenance
         )
-        known_log = confirmed_scale or "log2" in transform or "log_2" in transform or transform in {
-            "already_log2", "已取 log2", "已取log2"
-        }
+        compact_transform = "".join(transform.split())
+        explicit_formula = "log2(" in compact_transform or "log_2(" in compact_transform
+        explicit_label = compact_transform in {"already_log2", "已取log2"}
+        affirmative_log2 = any(token in compact_transform for token in (
+            "log2-transformed", "log2transformed", "已转换为log2", "已取log2",
+            "log2尺度", "log2表达", "log2转换", "转换为log2",
+        ))
+        known_log = confirmed_scale or explicit_formula or explicit_label or affirmative_log2
         if not known_log:
             return [Issue(
                 "INVALID_TRANSFORM",

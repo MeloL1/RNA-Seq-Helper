@@ -149,6 +149,30 @@ def test_generic_log_rejects_unknown_transform_evidence(tmp_path: Path) -> None:
     assert any(issue.code == "INVALID_TRANSFORM" for issue in plan.blockers)
 
 
+def test_generic_log_rejects_negative_or_conflicting_log2_text(tmp_path: Path) -> None:
+    rng = np.random.default_rng(11)
+    values = rng.normal(5.0, 0.35, size=(600, len(SAMPLES)))
+    values += np.arange(600, dtype=float)[:, None] / 100.0
+    for index, transform in enumerate((
+        "not log2; scale unconfirmed", "log10(expression)", "未取 log2",
+        "possibly log2", "log2 is required but not yet applied",
+        "log2(x+1) not applied", "log2 转换尚未应用",
+    )):
+        case_dir = tmp_path / str(index)
+        case_dir.mkdir()
+        matrix = _matrix(
+            case_dir,
+            values,
+            input_transform=transform,
+            provenance="user-confirmed input facts; user-confirmed value_scale=LOG2",
+        )
+
+        plan = PlanningService().build(matrix, _assignments())
+
+        assert not plan.runnable, transform
+        assert any(issue.code == "INVALID_TRANSFORM" for issue in plan.blockers), transform
+
+
 def test_generic_log_accepts_explicit_user_confirmed_log2_scale(tmp_path: Path) -> None:
     rng = np.random.default_rng(10)
     values = rng.normal(5.0, 0.35, size=(600, len(SAMPLES)))

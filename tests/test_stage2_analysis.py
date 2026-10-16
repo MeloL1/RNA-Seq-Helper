@@ -164,6 +164,12 @@ def test_worker_result_contract_rejects_invalid_probabilities_and_labels(tmp_pat
                 [invalid_row], ["gene_0000"], plan, "RAW_COUNT",
             )
 
+    with pytest.raises(ValueError, match="original_id 与输入特征编号不一致"):
+        AnalysisService._validate_result_table(
+            [{**valid_row, "original_id": "wrong_feature"}],
+            ["gene_0000"], plan, "RAW_COUNT",
+        )
+
 
 def test_result_contract_verifies_bh_values_and_requires_lm_padjustment(tmp_path: Path) -> None:
     matrix = _matrix(tmp_path, MeasurementType.RAW_COUNT, np.ones((2, len(SAMPLES))))

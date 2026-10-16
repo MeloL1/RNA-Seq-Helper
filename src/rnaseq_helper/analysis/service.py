@@ -625,12 +625,14 @@ class AnalysisService:
         if not isinstance(table, list) or len(table) != len(feature_ids):
             raise ValueError("R worker 返回的结果行数与输入特征数不一致")
         returned_ids: list[str] = []
+        returned_original_ids: list[str] = []
         expected_effect_scale = "log2_count_model" if plan.method == "DESEQ2" else "log2_expression"
         expected_unit = "RAW_COUNT" if plan.method == "DESEQ2" else measurement_type
         for row in table:
             if not isinstance(row, dict) or not required.issubset(row):
                 raise ValueError("R worker 返回的结果表缺少统一字段")
             returned_ids.append(str(row["feature_key"]))
+            returned_original_ids.append(str(row["original_id"]))
             if str(row["analysis_method"]) != plan.method:
                 raise ValueError("R worker 返回的结果方法字段与分析计划不一致")
             if str(row["analysis_basis"]) != plan.analysis_basis:
@@ -703,6 +705,8 @@ class AnalysisService:
                 raise ValueError("R worker 返回的 padj 与对应检验集合的 BH 校正不一致")
         if returned_ids != [str(value) for value in feature_ids]:
             raise ValueError("R worker 返回的特征顺序或编号与输入不一致")
+        if returned_original_ids != [str(value) for value in feature_ids]:
+            raise ValueError("R worker 返回的 original_id 与输入特征编号不一致")
 
     @staticmethod
     def _bh_adjust(pvalues: list[float]) -> list[float]:
