@@ -37,6 +37,6 @@ cd packaging && ../.venv/bin/python setup.py py2app
 
 若项目路径继承了 macOS FinderInfo/provenance 扩展属性，严格签名校验可能误报资源错误。发布前应从无扩展属性的干净构建目录重新签名；本阶段只验证了本机 ad-hoc 构建和无扩展属性复制品的校验。
 
-本机正式安装流程：构建一次、内置 R 一次、生成 clean bundle 并验证，再用 clean bundle 替换 `/Applications/RNA-Seq Helper.app`。不要因原始 `dist` 的严格签名检查报“code has no resources”就重跑构建；先用 `prepare_clean_bundle.py` 复制并规范化 bundle。该脚本会处理已知的 `liblzma` 签名问题、重新 ad-hoc 签名并执行严格校验。安装记录见本地 `docs/development/STATUS.md`。
+本机正式安装流程：构建一次、内置 R 一次、生成 clean bundle 并验证，再用 clean bundle 替换 `/Applications/RNA-Seq Helper.app`。不要因原始 `dist` 的严格签名检查报“code has no resources”就重跑构建；先用 `prepare_clean_bundle.py` 复制并规范化 bundle。该脚本会处理已知的 `liblzma` 签名问题、重新 ad-hoc 签名并执行严格校验。
 
 `verify_bundle.py` 会启动 bundle 自检入口（包括 micro-test），仅适用于明确需要此类开发检查的场景；它不能代替正式安装版的实际软件操作，也不能代替真实数据与独立 R 结果的交叉核对。验收记录应区分这些证据层级。
