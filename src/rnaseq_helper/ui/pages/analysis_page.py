@@ -397,6 +397,8 @@ class AnalysisPage(QWidget):
 
     @Slot(str)
     def _analysis_progress(self, message: str) -> None:
+        if message.startswith("正在保存分析结果"):
+            self.cancel_button.setEnabled(False)
         self.status_label.setText(f"分析中：{message}")
 
     def _assignments(self) -> dict[str, str]:

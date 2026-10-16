@@ -142,6 +142,7 @@ class AnalysisService:
                 analysis_artifact_dir=staging_dir / "analysis",
             )
             self._raise_if_cancelled(context)
+            context.emit("publish", None, "正在保存分析结果；此阶段不可取消")
             self._publish_outputs(project_dir, staging_dir, context.cancelled)
         except OutputPublishRollbackError:
             # Even if moving the failed transaction to its recovery name fails,
@@ -235,6 +236,7 @@ class AnalysisService:
             AnalysisService._check_cancelled(cancelled)
             journal["phase"] = "committed"
             AnalysisService._write_transaction_journal(staging_dir, journal)
+            AnalysisService._check_cancelled(cancelled)
         except Exception as publish_error:
             rollback_errors: list[str] = []
             targets_with_backups = {target for _, target in backups}
