@@ -387,7 +387,10 @@ class AnalysisPage(QWidget):
 
     @Slot(str)
     def _analysis_failed(self, error: str) -> None:
-        self.status_label.setText(f"分析失败：{error}")
+        if error.startswith("任务已取消"):
+            self.status_label.setText("分析已取消；原有结果保持不变。")
+        else:
+            self.status_label.setText(f"分析失败：{error}")
         self.plan_button.setEnabled(True)
         self.run_button.setEnabled(True)
         self.cancel_button.setEnabled(False)

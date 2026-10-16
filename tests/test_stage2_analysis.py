@@ -116,6 +116,28 @@ def test_analysis_blocks_raw_count_over_r_integer_limit_before_worker(tmp_path: 
         AnalysisService(MustNotRunBridge()).run(matrix, plan, JobContext(tmp_path))
 
 
+def test_cancel_after_r_returns_preserves_existing_analysis_outputs(tmp_path: Path) -> None:
+    from rnaseq_helper.r_bridge.client import RBridgeError
+
+    matrix = _matrix(tmp_path, MeasurementType.RAW_COUNT, np.full((4, len(SAMPLES)), 20.0))
+    plan = PlanningService().build(matrix, _assignments())
+    context = JobContext(tmp_path)
+    existing_result = tmp_path / "analysis" / "deg-result.json"
+    existing_result.parent.mkdir(parents=True)
+    existing_result.write_text("previous result", encoding="utf-8")
+
+    class CancelAfterBridge:
+        def run(self, *_args, **_kwargs):
+            context.cancel_event.set()
+            return RJobResponse("test", True, {})
+
+    with pytest.raises(RBridgeError, match="任务已取消；旧分析结果保持不变"):
+        AnalysisService(CancelAfterBridge()).run(matrix, plan, context)
+
+    assert existing_result.read_text(encoding="utf-8") == "previous result"
+    assert not list(tmp_path.glob(".analysis-staging-*"))
+
+
 def test_worker_result_contract_rejects_invalid_probabilities_and_labels(tmp_path: Path) -> None:
     matrix = _matrix(tmp_path, MeasurementType.RAW_COUNT, np.ones((1, len(SAMPLES))))
     plan = PlanningService().build(matrix, _assignments())
@@ -406,6 +428,51 @@ def test_output_publish_rolls_back_if_a_file_cannot_be_replaced(
     assert {
         relative: (project_dir / relative).read_bytes()
         for relative in relative_outputs
+    } == old_contents
+
+
+def test_cancel_during_output_publish_rolls_back_all_replaced_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+    from threading import Event
+    from rnaseq_helper.r_bridge.client import RBridgeError
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    staging_dir = project_dir / ".analysis-staging-cancel-test"
+    old_contents = {}
+    for relative_path in AnalysisService.OUTPUT_RELATIVE_PATHS:
+        relative = relative_path.as_posix()
+        target = project_dir / relative_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(f"old:{relative}".encode())
+        old_contents[relative] = target.read_bytes()
+        staged = staging_dir / relative_path
+        staged.parent.mkdir(parents=True, exist_ok=True)
+        staged.write_bytes(f"new:{relative}".encode())
+    AnalysisService._write_transaction_journal(
+        staging_dir, AnalysisService._new_transaction_journal(project_dir, phase="preparing"),
+    )
+
+    cancel_event = Event()
+    real_replace = os.replace
+    first_new_file = project_dir / AnalysisService.OUTPUT_RELATIVE_PATHS[0]
+
+    def cancel_after_first_install(source, target):
+        result = real_replace(source, target)
+        first_staged_file = staging_dir / AnalysisService.OUTPUT_RELATIVE_PATHS[0]
+        if Path(target) == first_new_file and Path(source) == first_staged_file:
+            cancel_event.set()
+        return result
+
+    monkeypatch.setattr("rnaseq_helper.analysis.service.os.replace", cancel_after_first_install)
+    with pytest.raises(RBridgeError, match="任务已取消；旧分析结果保持不变"):
+        AnalysisService._publish_outputs(project_dir, staging_dir, cancel_event.is_set)
+
+    assert {
+        relative: (project_dir / relative).read_bytes()
+        for relative in old_contents
     } == old_contents
 
 

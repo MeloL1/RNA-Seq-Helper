@@ -8,11 +8,11 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 
 from rnaseq_helper.domain.models import AnalysisPlan, ExpressionMatrix, JobContext, sha256_file
-from rnaseq_helper.r_bridge.client import RBridgeClient
+from rnaseq_helper.r_bridge.client import RBridgeClient, RBridgeError
 from rnaseq_helper.analysis.planning import PlanningService
 from rnaseq_helper.services.project_lock import project_directory_lock
 
@@ -61,6 +61,7 @@ class AnalysisService:
             and sha256_file(matrix.feature_metadata.path) != plan.feature_metadata_hash
         ):
             raise ValueError("特征注释已变化，当前分析计划失效；请重新确认计划")
+        self._raise_if_cancelled(context)
         feature_ids, sample_ids, values = self._read_matrix(matrix.values.path)
         if plan.method == "DESEQ2" and any(
             value > 2_147_483_647 for row in values for value in row
@@ -104,6 +105,7 @@ class AnalysisService:
             payload["filter_threshold"] = plan.preprocessing.get("filter_threshold")
             method = "analyze_limma"
         response = self.bridge.run(method, payload, context, plan.method_profile_id)
+        self._raise_if_cancelled(context)
         result = dict(response.result or {})
         expected = {"method": plan.method, "profile_id": plan.method_profile_id}
         if result.get("method") != expected["method"] or result.get("profile_id") != expected["profile_id"]:
@@ -132,13 +134,15 @@ class AnalysisService:
                 output_dir=staging_dir / "figures",
                 manifest_dir=project_dir / "figures",
             )
+            self._raise_if_cancelled(context)
             ReportService().build(
                 matrix, plan, result, figures,
                 output_dir=staging_dir / "reports",
                 project_dir=project_dir,
                 analysis_artifact_dir=staging_dir / "analysis",
             )
-            self._publish_outputs(project_dir, staging_dir)
+            self._raise_if_cancelled(context)
+            self._publish_outputs(project_dir, staging_dir, context.cancelled)
         except OutputPublishRollbackError:
             # Even if moving the failed transaction to its recovery name fails,
             # never let temporary-directory cleanup delete the only old copies.
@@ -150,7 +154,11 @@ class AnalysisService:
         return result
 
     @staticmethod
-    def _publish_outputs(project_dir: Path, staging_dir: Path) -> None:
+    def _publish_outputs(
+        project_dir: Path,
+        staging_dir: Path,
+        cancelled: Callable[[], bool] | None = None,
+    ) -> None:
         """Replace only known analysis artifacts; roll back old files on publish errors."""
         project_dir = project_dir.resolve(strict=True)
         if Path(staging_dir).is_symlink():
@@ -164,6 +172,7 @@ class AnalysisService:
         installed: list[Path] = []
         journal_path = staging_dir / ".transaction.json"
         try:
+            AnalysisService._check_cancelled(cancelled)
             expected_states: dict[str, dict[str, Any]] = {}
             for relative in relative_paths:
                 staged = staging_dir / relative
@@ -203,6 +212,7 @@ class AnalysisService:
             AnalysisService._write_transaction_journal(staging_dir, journal)
 
             for relative in relative_paths:
+                AnalysisService._check_cancelled(cancelled)
                 staged = staging_dir / relative
                 target = project_dir / relative
                 original = expected_states[relative.as_posix()]
@@ -222,6 +232,7 @@ class AnalysisService:
                 installed.append(target)
                 AnalysisService._fsync_directory(staged.parent)
                 AnalysisService._fsync_directory(target.parent)
+            AnalysisService._check_cancelled(cancelled)
             journal["phase"] = "committed"
             AnalysisService._write_transaction_journal(staging_dir, journal)
         except Exception as publish_error:
@@ -264,6 +275,15 @@ class AnalysisService:
                     + recovery_note
                 ) from publish_error
             raise
+
+    @staticmethod
+    def _check_cancelled(cancelled: Callable[[], bool] | None) -> None:
+        if cancelled is not None and cancelled():
+            raise RBridgeError("任务已取消；旧分析结果保持不变")
+
+    @staticmethod
+    def _raise_if_cancelled(context: JobContext) -> None:
+        AnalysisService._check_cancelled(context.cancelled)
 
     @staticmethod
     def _write_transaction_journal(staging_dir: Path, journal: dict[str, Any]) -> None:
